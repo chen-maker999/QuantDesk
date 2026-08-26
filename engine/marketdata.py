@@ -34,14 +34,14 @@ os.environ.setdefault("no_proxy", os.environ["NO_PROXY"])
 from fastapi import APIRouter  # noqa: E402
 
 try:  # 兼容 dev(.venv python engine/main.py)与打包产物
-    from .database import audit, connect, get_setting, read_bars, read_quote_cache, upsert_bars, upsert_quote_cache
+    from .database import audit, connect, get_setting, read_bars, read_quote_cache, upsert_analysis_bars, upsert_bars, upsert_quote_cache
     from .netsec import UnsafeUrlError, validate_public_https_url
 except ImportError:
     try:
-        from engine.database import audit, connect, get_setting, read_bars, read_quote_cache, upsert_bars, upsert_quote_cache
+        from engine.database import audit, connect, get_setting, read_bars, read_quote_cache, upsert_analysis_bars, upsert_bars, upsert_quote_cache
         from engine.netsec import UnsafeUrlError, validate_public_https_url
     except ImportError:
-        from database import audit, connect, get_setting, read_bars, read_quote_cache, upsert_bars, upsert_quote_cache
+        from database import audit, connect, get_setting, read_bars, read_quote_cache, upsert_analysis_bars, upsert_bars, upsert_quote_cache
         from netsec import UnsafeUrlError, validate_public_https_url
 
 router = APIRouter(prefix="/market")
@@ -830,8 +830,11 @@ def import_daily_prices(symbol: str, market: str = "a", adjust: str = "qfq", lim
         return {"ok": False, "error": f"{symbol} 没有可用日 K 数据({result.get('error') or 'empty'})"}
     with connect() as db:
         db.executemany("INSERT OR REPLACE INTO market_prices(symbol,trade_date,close,source) VALUES(?,?,?,?)", [(s, d, c, "market_bars") for s, d, c in rows])
-    audit("market_prices_imported", {"provider": "market_bars", "symbol": stored_symbol, "rows": len(rows), "adjust": adjust})
-    return {"ok": True, "symbol": stored_symbol, "market": market, "adjust": adjust, "rows": len(rows), "start": rows[0][1], "end": rows[-1][1], "source": "market_bars"}
+    source = str(result.get("source") or "market_bars")
+    analysis_rows = [{"symbol": stored_symbol, "trade_date": str(bar["ts"])[:10], "market": market, "adjust": adjust, "source": source, "open": bar.get("open"), "high": bar.get("high"), "low": bar.get("low"), "close": bar.get("close"), "volume": bar.get("volume"), "amount": bar.get("amount")} for bar in bars if bar.get("ts") and bar.get("close") is not None]
+    upsert_analysis_bars(analysis_rows)
+    audit("market_prices_imported", {"provider": source, "symbol": stored_symbol, "rows": len(rows), "ohlcv_rows": len(analysis_rows), "adjust": adjust})
+    return {"ok": True, "symbol": stored_symbol, "market": market, "adjust": adjust, "rows": len(rows), "ohlcv_rows": len(analysis_rows), "start": rows[0][1], "end": rows[-1][1], "source": source}
 
 
 @router.get("/news")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import time
@@ -60,6 +61,18 @@ def initialize() -> None:
                 PRIMARY KEY(symbol, trade_date)
             );
             CREATE INDEX IF NOT EXISTS idx_market_prices_date ON market_prices(trade_date);
+            CREATE TABLE IF NOT EXISTS analysis_bars (
+                symbol TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                market TEXT NOT NULL DEFAULT 'unknown',
+                adjust TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL,
+                open REAL, high REAL, low REAL, close REAL NOT NULL,
+                volume REAL, amount REAL,
+                ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(symbol, trade_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_analysis_bars_symbol_date ON analysis_bars(symbol, trade_date);
             CREATE TABLE IF NOT EXISTS holdings (
                 symbol TEXT PRIMARY KEY,
                 name TEXT,
@@ -521,6 +534,66 @@ def upsert_bars(rows: list[dict[str, Any]]) -> None:
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             values,
         )
+
+
+def upsert_analysis_bars(rows: list[dict[str, Any]]) -> None:
+    """写入研究使用的日线原始字段与数据血缘；绝不从 close 合成 OHLCV。"""
+    if not rows:
+        return
+    values: list[tuple[Any, ...]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        trade_date = str(row.get("trade_date") or "").strip()[:10]
+        source = str(row.get("source") or "").strip()
+        if not symbol or not trade_date or not source:
+            raise ValueError("analysis_bars 必须包含 symbol、trade_date 和 source")
+
+        def number(name: str, *, required: bool = False) -> float | None:
+            value = row.get(name)
+            if value is None or value == "":
+                if required:
+                    raise ValueError(f"analysis_bars 缺少 {name}")
+                return None
+            try:
+                result = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"analysis_bars 的 {name} 不是数值") from exc
+            if not math.isfinite(result):
+                raise ValueError(f"analysis_bars 的 {name} 必须是有限数值")
+            return result
+
+        open_ = number("open")
+        high = number("high")
+        low = number("low")
+        close = number("close", required=True)
+        volume = number("volume")
+        amount = number("amount")
+        if close is None or close <= 0:
+            raise ValueError("analysis_bars 的 close 必须大于 0")
+        prices = [value for value in (open_, high, low, close) if value is not None]
+        if any(value <= 0 for value in prices):
+            raise ValueError("analysis_bars 的 OHLC 必须大于 0")
+        if high is not None and high < max(value for value in (open_, low, close) if value is not None):
+            raise ValueError("analysis_bars 的 high 小于 OHLC")
+        if low is not None and low > min(value for value in (open_, high, close) if value is not None):
+            raise ValueError("analysis_bars 的 low 大于 OHLC")
+        if (volume is not None and volume < 0) or (amount is not None and amount < 0):
+            raise ValueError("analysis_bars 的 volume/amount 不能为负")
+        values.append((symbol, trade_date, str(row.get("market") or "unknown"), str(row.get("adjust") or ""), source, open_, high, low, close, volume, amount))
+    with connect() as db:
+        db.executemany(
+            "INSERT INTO analysis_bars(symbol,trade_date,market,adjust,source,open,high,low,close,volume,amount) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(symbol,trade_date) DO UPDATE SET market=excluded.market,adjust=excluded.adjust,source=excluded.source,open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume,amount=excluded.amount,ingested_at=CURRENT_TIMESTAMP",
+            values,
+        )
+
+
+def read_analysis_bars() -> list[dict[str, Any]]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT symbol,trade_date,market,adjust,source,open,high,low,close,volume,amount,ingested_at FROM analysis_bars ORDER BY symbol,trade_date"
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def read_bars(market: str, symbol: str, period: str, adjust: str = "qfq", limit: int = 320) -> list[dict[str, Any]]:

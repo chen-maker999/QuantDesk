@@ -8,7 +8,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin
@@ -20,17 +20,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 try:
-    from .database import add_notification, add_thread_message, audit, clear_thread_messages, connect, delete_alert, delete_chat_thread, get_setting, initialize, list_alerts, list_chat_threads, list_notifications, list_thread_messages, mark_alert_triggered, mark_notifications_read, pop_setting, save_experiment, set_setting, unread_notification_count, upsert_alert, upsert_chat_thread
+    from .database import add_notification, add_thread_message, audit, clear_thread_messages, connect, delete_alert, delete_chat_thread, get_setting, initialize, list_alerts, list_chat_threads, list_notifications, list_thread_messages, mark_alert_triggered, mark_notifications_read, pop_setting, read_analysis_bars, save_experiment, set_setting, unread_notification_count, upsert_alert, upsert_analysis_bars, upsert_chat_thread
     from .quant import backtest_signal, optimize_portfolio, risk_report, run_alpha_ensemble
 except ImportError:
     try:
-        from engine.database import add_notification, add_thread_message, audit, clear_thread_messages, connect, delete_alert, delete_chat_thread, get_setting, initialize, list_alerts, list_chat_threads, list_notifications, list_thread_messages, mark_alert_triggered, mark_notifications_read, pop_setting, save_experiment, set_setting, unread_notification_count, upsert_alert, upsert_chat_thread
+        from engine.database import add_notification, add_thread_message, audit, clear_thread_messages, connect, delete_alert, delete_chat_thread, get_setting, initialize, list_alerts, list_chat_threads, list_notifications, list_thread_messages, mark_alert_triggered, mark_notifications_read, pop_setting, read_analysis_bars, save_experiment, set_setting, unread_notification_count, upsert_alert, upsert_analysis_bars, upsert_chat_thread
         from engine.quant import backtest_signal, optimize_portfolio, risk_report, run_alpha_ensemble
     except ImportError:
-        from database import add_notification, add_thread_message, audit, clear_thread_messages, connect, delete_alert, delete_chat_thread, get_setting, initialize, list_alerts, list_chat_threads, list_notifications, list_thread_messages, mark_alert_triggered, mark_notifications_read, pop_setting, save_experiment, set_setting, unread_notification_count, upsert_alert, upsert_chat_thread
+        from database import add_notification, add_thread_message, audit, clear_thread_messages, connect, delete_alert, delete_chat_thread, get_setting, initialize, list_alerts, list_chat_threads, list_notifications, list_thread_messages, mark_alert_triggered, mark_notifications_read, pop_setting, read_analysis_bars, save_experiment, set_setting, unread_notification_count, upsert_alert, upsert_analysis_bars, upsert_chat_thread
         from quant import backtest_signal, optimize_portfolio, risk_report, run_alpha_ensemble
 
 try:
@@ -159,11 +159,35 @@ class MarketPriceRow(BaseModel):
     symbol: str = Field(min_length=1, max_length=32)
     date: str = Field(min_length=8, max_length=32)
     close: float = Field(gt=0)
+    open: float | None = Field(default=None, gt=0)
+    high: float | None = Field(default=None, gt=0)
+    low: float | None = Field(default=None, gt=0)
+    volume: float | None = Field(default=None, ge=0)
+    amount: float | None = Field(default=None, ge=0)
+
+    @field_validator("date")
+    @classmethod
+    def normalize_trade_date(cls, value: str) -> str:
+        try:
+            return date.fromisoformat(value[:10]).isoformat()
+        except ValueError as exc:
+            raise ValueError("date 必须是 YYYY-MM-DD") from exc
+
+    @model_validator(mode="after")
+    def validate_ohlc(self) -> "MarketPriceRow":
+        prices = [value for value in (self.open, self.high, self.low, self.close) if value is not None]
+        if self.high is not None and self.high < max(prices):
+            raise ValueError("high 不能小于 open/low/close")
+        if self.low is not None and self.low > min(prices):
+            raise ValueError("low 不能大于 open/high/close")
+        return self
 
 
 class MarketImportRequest(BaseModel):
     rows: list[MarketPriceRow] = Field(min_length=1, max_length=500_000)
     source: str = Field(default="csv", max_length=40)
+    market: str = Field(default="unknown", max_length=16)
+    adjust: str = Field(default="", pattern="^(qfq|hfq|)$")
 
 
 class ProviderConfigureRequest(BaseModel):
@@ -296,7 +320,7 @@ AGENT_TOOLS = [
     {"type":"function","name":"list_scheduled_tasks","description":"列出全部定时任务(id、名称、频率、是否启用、上次运行状态)。定时任务到点会自动运行 Agent。","parameters":{"type":"object","properties":{},"additionalProperties":False}},
     {"type":"function","name":"create_scheduled_task","description":"创建或更新一个定时任务,到点自动运行 Agent。频率 frequency 支持 once(一次性,需 hour/minute)/hourly(每小时,可指定 minute)/daily(每天,需 hour/minute)/weekly(每周,需 hour/minute/weekdays 0=周日..6=周六)/interval(固定间隔,需 intervalMinutes)。prompt 是到点时自动运行的任务内容。传入已有 task_id 即更新该任务(可改 prompt/频率/启用状态)。","parameters":{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"frequency":{"type":"string","enum":["once","hourly","daily","weekly","interval"]},"hour":{"type":"integer","minimum":0,"maximum":23},"minute":{"type":"integer","minimum":0,"maximum":59},"weekdays":{"type":"array","items":{"type":"integer","minimum":0,"maximum":6}},"intervalMinutes":{"type":"integer","minimum":1,"maximum":10080},"model":{"type":"string"},"provider":{"type":"string","enum":["openai","deepseek","qwen"]},"reasoning":{"type":"string","enum":["off","low","medium","high"]},"task_id":{"type":"string","description":"更新已有任务时传入其 id;创建新任务可省略"}},"required":["name","prompt","frequency"],"additionalProperties":False}},
     {"type":"function","name":"delete_scheduled_task","description":"删除一个定时任务(按 id)。删除后不再自动运行。","parameters":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"],"additionalProperties":False}},
-    {"type":"function","name":"run_factor_research","description":"在已导入的真实日收盘价数据上研究一个自定义因子:用户以受限 DSL 函数 factor(df) 定义（df 目前只含 close 列）,返回按日期索引的因子 Series。输出 RankIC 均值、ICIR、IC 胜率、t 值、分层回测各层年化与多空收益、1-5 日衰减。至少需要 3 个标的、每个 60+ 行日线。","parameters":{"type":"object","properties":{"code":{"type":"string","description":"完整因子函数源码,如 def factor(df): return df['close'].pct_change(20)"},"horizon":{"type":"integer","minimum":1,"maximum":10},"quantiles":{"type":"integer","minimum":2,"maximum":10}},"required":["code"],"additionalProperties":False}},
+    {"type":"function","name":"run_factor_research","description":"在已导入的真实日线数据上研究自定义因子:受限 DSL 的 factor(df) 至少可用 close；由行情中心导入的完整日线可用 open/high/low/volume/amount。因子引用的字段必须在每个标的完整存在，系统会排除缺字段标的并报告覆盖范围，绝不合成 OHLCV。输出 RankIC、ICIR、分层回测与 1-5 日衰减。至少需要 3 个标的、每个 60+ 行日线。","parameters":{"type":"object","properties":{"code":{"type":"string","description":"完整因子函数源码,如 def factor(df): return df['close'].pct_change(20)"},"horizon":{"type":"integer","minimum":1,"maximum":10},"quantiles":{"type":"integer","minimum":2,"maximum":10}},"required":["code"],"additionalProperties":False}},
     {"type":"function","name":"run_portfolio_backtest","description":"组合级事件驱动回测:对给定目标权重(weights,自动归一化)按 rebalance_days 周期再平衡,计入佣金与滑点成本,输出净值曲线、年化/夏普/回撤/胜率/换手、相对等权基准的超额及逐标的归因。基于已导入的本地价格。","parameters":{"type":"object","properties":{"weights":{"type":"object","additionalProperties":{"type":"number"},"description":"如 {\"600519\":0.4,\"000001\":0.6}"},"rebalance_days":{"type":"integer","minimum":0,"maximum":250},"cost_bps":{"type":"number","minimum":0,"maximum":200},"slippage_bps":{"type":"number","minimum":0,"maximum":200}},"required":["weights"],"additionalProperties":False}},
     {"type":"function","name":"manage_price_alerts","description":"价格与风险预警管理:list 列出全部预警;create 创建预警(kind 支持 price_above/price_below 价格、pct_change_above/pct_change_below 当日涨跌幅%、concentration_above 单票持仓占比%、drawdown_below 组合回撤%);delete 按 id 删除。预警到点由引擎每 30 秒检查并推送通知。","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["list","create","delete"]},"symbol":{"type":"string"},"market":{"type":"string","enum":["a","index","futures"]},"kind":{"type":"string"},"threshold":{"type":"number"},"note":{"type":"string"},"alert_id":{"type":"string"}},"required":["action"],"additionalProperties":False}},
     {"type":"function","name":"list_recent_notifications","description":"查看最近的系统通知(预警触发、定时任务结果等),可只看未读。","parameters":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":50},"unread_only":{"type":"boolean"}},"required":[],"additionalProperties":False}},
@@ -312,7 +336,7 @@ Skills (follow the matching playbook, call tools instead of guessing):
 - 补数据: If prices are missing, call fetch_public_quotes (no market key) or import_market_prices (把行情中心的某只标的日 K 固化进分析库,之后可被 Alpha扫描/回测/风险工具使用) or tell the user to import CSV. Do not claim a vendor key is required for all market access.
 - 网页浏览: browse_page 抓取指定 URL 正文。适合查公司公告原文、政策原文、新闻详情、研报摘要等,读取后据此作答。
 - 定时任务: list_scheduled_tasks 查看现有定时任务;create_scheduled_task 创建/更新周期任务(到点自动运行 Agent);delete_scheduled_task 删除任务。适合周期性盯盘、每日复盘、定期生成报告等需求。
-- 因子研究: run_factor_research 用用户给的 Python 因子函数在真实数据上算 RankIC/ICIR/分层回测/衰减;样本不足或代码非法时如实报告原因。
+- 因子研究: run_factor_research 用受限因子函数在真实数据上算 RankIC/ICIR/分层回测/衰减。只有完整导入的日线才有 OHLCV/amount；绝不假设或合成缺失字段，并如实报告覆盖范围。
 - 组合回测: run_portfolio_backtest 对目标权重做含成本再平衡回测,报告净值、超额与逐标的归因;权重来自用户或优化工具结果,不得凭空编造标的。
 - 预警: manage_price_alerts 创建价格/涨跌幅/集中度/回撤预警(list 查看现有预警避免重复建);list_recent_notifications 查看已触发的通知。
 """
@@ -490,6 +514,22 @@ def _price_series() -> dict[str, list[tuple[str, float]]]:
     for row in rows:
         series.setdefault(row["symbol"], []).append((row["trade_date"], float(row["close"])))
     return series
+
+
+def _factor_inputs() -> dict[str, pd.Series | pd.DataFrame]:
+    """因子研究优先读取可追溯的真实 OHLCV；其余来源只保留真实 close。"""
+    inputs: dict[str, pd.Series | pd.DataFrame] = {
+        symbol: pd.Series({trade_date: price for trade_date, price in points}).sort_index()
+        for symbol, points in _price_series().items()
+    }
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in read_analysis_bars():
+        grouped.setdefault(str(row["symbol"]), []).append(row)
+    fields = ["open", "high", "low", "close", "volume", "amount"]
+    for symbol, rows in grouped.items():
+        frame = pd.DataFrame(rows).set_index("trade_date").sort_index()
+        inputs[symbol] = frame[[field for field in fields if field in frame.columns]]
+    return inputs
 
 
 def _portfolio_returns() -> list[float]:
@@ -1120,8 +1160,8 @@ def _tool_result(name: str, arguments: dict[str, Any], access_mode: str = "ask")
             quantiles = int(arguments.get("quantiles") or 5)
             factor_fn = compile_factor(code)
             series = _price_series()
-            panel, closes = build_panels(series, min_rows=60)
-            result = evaluate_factor(factor_fn, closes, horizon=horizon, quantiles=quantiles)
+            panel, _ = build_panels(series, min_rows=60)
+            result = evaluate_factor(factor_fn, _factor_inputs(), horizon=horizon, quantiles=quantiles)
             result["factor_name"] = str(arguments.get("name") or "custom_factor")
             experiment_id = save_experiment("factor_research", result["factor_name"], {"code": code[:2000], "horizon": horizon, "quantiles": quantiles}, {k: v for k, v in result.items() if k != "ic_series_tail"})
             audit("factor_evaluated", {"experiment_id": experiment_id, "symbols": len(result.get("symbols", [])), "ic_mean": result.get("ic_mean")})
@@ -1781,7 +1821,14 @@ async def run_scheduler_task_now(task_id: str) -> dict[str, Any]:
 def import_market(request: MarketImportRequest) -> dict[str, Any]:
     with connect() as db:
         db.executemany("INSERT OR REPLACE INTO market_prices(symbol,trade_date,close,source) VALUES(?,?,?,?)", [(row.symbol.strip().upper(), row.date, row.close, request.source) for row in request.rows])
-    audit("market_data_imported", {"rows": len(request.rows), "source": request.source})
+    analysis_rows = [
+        {"symbol": row.symbol, "trade_date": row.date, "market": request.market, "adjust": request.adjust, "source": request.source, "open": row.open, "high": row.high, "low": row.low, "close": row.close, "volume": row.volume, "amount": row.amount}
+        for row in request.rows
+        if any(value is not None for value in (row.open, row.high, row.low, row.volume, row.amount))
+    ]
+    if analysis_rows:
+        upsert_analysis_bars(analysis_rows)
+    audit("market_data_imported", {"rows": len(request.rows), "ohlcv_rows": len(analysis_rows), "source": request.source, "market": request.market, "adjust": request.adjust})
     return _workspace_status()
 
 
@@ -1837,8 +1884,8 @@ def risk(request: RiskRequest) -> dict[str, float]:
 def evaluate_custom_factor(request: FactorEvaluateRequest) -> dict[str, Any]:
     try:
         factor_fn = compile_factor(request.code)
-        panel, closes = build_panels(_price_series(), min_rows=60)
-        result = evaluate_factor(factor_fn, closes, horizon=request.horizon, quantiles=request.quantiles)
+        panel, _ = build_panels(_price_series(), min_rows=60)
+        result = evaluate_factor(factor_fn, _factor_inputs(), horizon=request.horizon, quantiles=request.quantiles)
         result["factor_name"] = request.name
         experiment_id = save_experiment("factor_research", request.name, {"code": request.code[:2000], "horizon": request.horizon, "quantiles": request.quantiles}, {k: v for k, v in result.items() if k != "ic_series_tail"})
         audit("factor_evaluated", {"experiment_id": experiment_id, "symbols": len(result.get("symbols", []))})

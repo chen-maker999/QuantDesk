@@ -7,7 +7,7 @@ QuantDesk 是由投资 Agent 主导的 Windows 本地优先量化研究桌面软
 - Agent 主工作区、任务执行轨迹、工具调用卡片、监督/自主权限、审批边界与上下文面板
 - 市场总览、研究会话、模型中心、策略回测、数据中心、投资组合、风险中心与设置
 - OpenAI Responses API，以及 DeepSeek、Qwen 的 OpenAI 兼容工具循环；过程文本、工具事件与最终答案逐段流式展示
-- Alpha Vantage 全球股票与外汇日线、Tushare Pro A 股与国内期货合约日线，也支持 CSV 导入；未配置或无数据时只显示真实空状态
+- Alpha Vantage 全球股票与外汇日线、Tushare Pro A 股与国内期货合约日线，也支持 CSV 导入；完整日线会保留 OHLCV/成交额、市场、复权和来源元数据供因子研究使用，缺字段时不会填造
 - `Ctrl+K` 命令面板、`Ctrl+N` 新任务、可折叠侧边栏与深浅主题
 - 所有 API Key 通过 Windows Credential Manager 独立保存，不写入项目文件或浏览器存储
 - Windows 后台算法引擎以无控制台模式运行，应用内不提供终端面板

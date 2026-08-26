@@ -31,7 +31,7 @@ const signedPct = (v: number | undefined) => v === undefined ? "—" : `${v >= 0
 
 // ---------- 因子研究卡 ----------
 export function FactorResearchCard({ status }: { status: WorkspaceStatus }) {
-  const [code, setCode] = useState(`def factor(df):\n    # df: 真实日收盘价 DataFrame(close)\n    close = df["close"]\n    mom = close.pct_change(20)\n    vol = close.pct_change().rolling(20).std()\n    return mom / vol`);
+  const [code, setCode] = useState(`def factor(df):\n    # df: 真实日线 DataFrame；至少含 close，完整导入时含 OHLCV/amount\n    close = df["close"]\n    mom = close.pct_change(20)\n    vol = close.pct_change().rolling(20).std()\n    return mom / vol`);
   const [horizon, setHorizon] = useState(1);
   const [quantiles, setQuantiles] = useState(5);
   const [busy, setBusy] = useState(false);
@@ -46,7 +46,7 @@ export function FactorResearchCard({ status }: { status: WorkspaceStatus }) {
   };
 
   return <div className="card factor-card">
-    <div className="provider-heading"><span><FlaskConical /></span><div><h2>因子研究</h2><p>用受限因子表达式在已导入的真实日收盘价上计算 RankIC、ICIR、分层回测与衰减；尚不支持 OHLCV/基本面数据。</p></div></div>
+    <div className="provider-heading"><span><FlaskConical /></span><div><h2>因子研究</h2><p>用受限因子表达式在真实日线上计算 RankIC、ICIR、分层回测与衰减。OHLCV/成交额只会在完整导入时可用，缺字段的标的不参与对应因子。</p></div></div>
     <textarea className="factor-code" value={code} onChange={e => setCode(e.target.value)} spellCheck={false} rows={6}/>
     <div className="factor-params">
       <label>预测期(日)<input type="number" min={1} max={10} value={horizon} onChange={e => setHorizon(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}/></label>
@@ -66,6 +66,7 @@ export function FactorResearchCard({ status }: { status: WorkspaceStatus }) {
           <div className="card"><small>样本期数</small><strong>{result.periods}</strong></div>
         </div>
         {result.layers && <div className="layer-table">{result.layers.map(l => <span key={l.layer}><em>第 {l.layer} 层</em><b className={l.annual_return > 0 ? "tone-up" : "tone-down"}>{signedPct(l.annual_return)}</b><small>夏普 {l.sharpe}</small></span>)}</div>}
+        {result.data_coverage && <p className="decay-line">数据覆盖：{result.data_coverage.required_columns.join("、")} · {result.data_coverage.symbols_with_complete_data} 个标的具备完整字段{Object.keys(result.data_coverage.excluded_symbols).length ? ` · 已排除 ${Object.keys(result.data_coverage.excluded_symbols).length} 个缺字段标的` : ""}</p>}
         {result.decay && result.decay.length > 0 && <p className="decay-line">衰减：{result.decay.map(d => `${d.horizon}日 IC ${d.ic}`).join(" · ")}</p>}
       </div> :
       <p className="ens-empty">{result.reason || "无法评估"}</p>)}

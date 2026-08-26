@@ -92,6 +92,7 @@ export type FactorResult = {
   long_short_annual?: number;
   layers?: Array<{ layer: number; annual_return: number; sharpe: number }>;
   decay?: Array<{ horizon: number; ic: number }>;
+  data_coverage?: { required_columns: string[]; symbols_with_complete_data: number; excluded_symbols: Record<string, string[]> };
 };
 
 export async function evaluateFactor(input: { name?: string; code: string; horizon?: number; quantiles?: number }): Promise<FactorResult> {
@@ -170,7 +171,7 @@ export async function getWorkspaceStatus():Promise<WorkspaceStatus>{
   return jsonRequest<WorkspaceStatus>("/workspace/status");
 }
 
-export async function importMarketRows(rows:Array<{symbol:string;date:string;close:number}>):Promise<WorkspaceStatus>{
+export async function importMarketRows(rows:Array<{symbol:string;date:string;close:number;open?:number;high?:number;low?:number;volume?:number;amount?:number}>):Promise<WorkspaceStatus>{
   return jsonRequest<WorkspaceStatus>("/workspace/market/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows,source:"csv"})});
 }
 

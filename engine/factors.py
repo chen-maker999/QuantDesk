@@ -25,7 +25,7 @@ class FactorCodeError(ValueError):
 
 # 本地分析库目前只持久化日收盘价。禁止把收盘价复制成 OHLCV 后继续研究，
 # 否则会把并不存在的成交量/高低价信息伪装成真实因子输入。
-_COLUMNS = {"close"}
+_COLUMNS = {"open", "high", "low", "close", "volume", "amount"}
 _SERIES_METHODS = {
     "abs", "clip", "diff", "ewm", "fillna", "mean", "median", "min", "max",
     "pct_change", "rank", "replace", "rolling", "shift", "std", "sum",
@@ -76,7 +76,7 @@ def _validate_expr(node: ast.AST, names: set[str]) -> None:
     if isinstance(node, ast.Constant):
         if isinstance(node.value, (int, float, bool, str)) or node.value is None:
             if isinstance(node.value, str) and node.value not in _COLUMNS:
-                raise _factor_error(node, "字符串仅可用于 close 列名")
+                raise _factor_error(node, "字符串仅可用于 open/high/low/close/volume/amount 列名")
             return
         raise _factor_error(node, "不支持该常量类型")
     if isinstance(node, ast.Name):
@@ -97,7 +97,7 @@ def _validate_expr(node: ast.AST, names: set[str]) -> None:
         return
     if isinstance(node, ast.Subscript):
         if not isinstance(node.value, ast.Name) or node.value.id != "df" or not isinstance(node.slice, ast.Constant) or node.slice.value not in _COLUMNS:
-            raise _factor_error(node, "当前本地数据仅支持 df['close']")
+            raise _factor_error(node, "只允许使用 df['open'/'high'/'low'/'close'/'volume'/'amount'] 取列")
         return
     if isinstance(node, ast.Call):
         _validate_call(node, names)
@@ -169,18 +169,28 @@ def compile_factor(code: str) -> Callable[[pd.DataFrame], pd.Series]:
     return_expr = fn.body[-1].value
 
     def evaluate(df: pd.DataFrame) -> pd.Series:
-        if not isinstance(df, pd.DataFrame) or not _COLUMNS.issubset(df.columns):
+        if not isinstance(df, pd.DataFrame) or "close" not in df.columns:
             raise FactorCodeError("因子输入必须包含 close 列")
         env: dict[str, Any] = {"df": df, "np": np}
         for statement in assignments:
             env[statement.targets[0].id] = _evaluate_expr(statement.value, env)
         return _evaluate_expr(return_expr, env)
 
+    required_columns = frozenset(
+        node.slice.value
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "df"
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    )
+    setattr(evaluate, "required_columns", required_columns)
     return evaluate
 
 
 def build_panels(series: dict[str, list[tuple[str, float]]], min_rows: int = 60) -> tuple[pd.DataFrame, dict[str, pd.Series]]:
-    """构造收盘价面板（日期×标的）；当前因子研究只使用真实 close 数据。"""
+    """构造收盘价面板（日期×标的）。"""
     closes = {}
     for symbol, points in series.items():
         if len(points) >= min_rows:
@@ -188,11 +198,23 @@ def build_panels(series: dict[str, list[tuple[str, float]]], min_rows: int = 60)
     return pd.DataFrame(closes).sort_index().dropna(how="all"), closes
 
 
-def evaluate_factor(factor_fn: Callable[[pd.DataFrame], pd.Series], closes: dict[str, pd.Series], horizon: int = 1, quantiles: int = 5) -> dict[str, Any]:
+def evaluate_factor(factor_fn: Callable[[pd.DataFrame], pd.Series], inputs: dict[str, pd.Series | pd.DataFrame], horizon: int = 1, quantiles: int = 5) -> dict[str, Any]:
     """在横截面上评估因子: IC 序列/IR/胜率/t 值、分层回测、多期衰减。"""
     factor_values: dict[str, pd.Series] = {}
-    for symbol, close in closes.items():
-        df = pd.DataFrame({"close": close})
+    closes: dict[str, pd.Series] = {}
+    skipped: dict[str, list[str]] = {}
+    required_columns = set(getattr(factor_fn, "required_columns", {"close"}))
+    for symbol, input_data in inputs.items():
+        df = pd.DataFrame({"close": input_data}) if isinstance(input_data, pd.Series) else input_data.copy()
+        missing = sorted(column for column in required_columns if column not in df.columns or df[column].isna().any())
+        if missing:
+            skipped[symbol] = missing
+            continue
+        close = pd.to_numeric(df["close"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        if close.isna().any():
+            skipped[symbol] = ["close"]
+            continue
+        closes[symbol] = close
         try:
             values = factor_fn(df)
         except Exception as exc:  # noqa: BLE001
@@ -204,7 +226,8 @@ def evaluate_factor(factor_fn: Callable[[pd.DataFrame], pd.Series], closes: dict
         if len(values) >= 30:
             factor_values[symbol] = values
     if len(factor_values) < 3:
-        raise FactorCodeError(f"可用标的不足（{len(factor_values)} 个），每个标的至少需要 30 个有效因子值")
+        details = f"；{len(skipped)} 个标的缺少 {','.join(sorted(required_columns))} 的完整真实数据" if skipped else ""
+        raise FactorCodeError(f"可用标的不足（{len(factor_values)} 个），每个标的至少需要 30 个有效因子值{details}")
 
     fwd = {s: c.pct_change(horizon).shift(-horizon) for s, c in closes.items()}
     dates = sorted(set().union(*[set(v.index) for v in factor_values.values()]))
@@ -227,7 +250,7 @@ def evaluate_factor(factor_fn: Callable[[pd.DataFrame], pd.Series], closes: dict
         raise FactorCodeError("有效 IC 样本不足（<10 期），请延长历史或放宽条件")
 
     ics = np.array([v for _, v in ic_list]); ic_mean = float(ics.mean()); ic_std = float(ics.std(ddof=1))
-    result: dict[str, Any] = {"available": True, "symbols": sorted(factor_values), "periods": len(ics), "first_date": ic_list[0][0], "last_date": ic_list[-1][0], "ic_mean": ic_mean, "ic_ir": float(ic_mean / ic_std) if ic_std > 0 else 0.0, "ic_positive_ratio": float((ics > 0).mean()), "t_stat": float(ic_mean / (ic_std / np.sqrt(len(ics)))) if ic_std > 0 else 0.0, "ic_series_tail": [{"date": d, "ic": round(v, 4)} for d, v in ic_list[-40:]]}
+    result: dict[str, Any] = {"available": True, "symbols": sorted(factor_values), "periods": len(ics), "first_date": ic_list[0][0], "last_date": ic_list[-1][0], "ic_mean": ic_mean, "ic_ir": float(ic_mean / ic_std) if ic_std > 0 else 0.0, "ic_positive_ratio": float((ics > 0).mean()), "t_stat": float(ic_mean / (ic_std / np.sqrt(len(ics)))) if ic_std > 0 else 0.0, "ic_series_tail": [{"date": d, "ic": round(v, 4)} for d, v in ic_list[-40:]], "data_coverage": {"required_columns": sorted(required_columns), "symbols_with_complete_data": len(factor_values), "excluded_symbols": skipped}}
     base = [curve for curve in layer_curves if curve]
     if base:
         length = min(len(curve) for curve in base); layers = []

@@ -35,9 +35,19 @@ class FactorResearchTest(unittest.TestCase):
         value = fn(df)
         self.assertIsInstance(value, pd.Series)
 
-    def test_factor_rejects_unavailable_ohlcv_fields(self):
+    def test_factor_requires_real_ohlcv_data_when_referenced(self):
+        fn = compile_factor("def factor(df): return df['volume'].pct_change()")
+        self.assertEqual(fn.required_columns, frozenset({"volume"}))
         with self.assertRaises(FactorCodeError):
-            compile_factor("def factor(df): return df['volume'].pct_change()")
+            evaluate_factor(fn, {f"S{i}": make_close(seed=i) for i in range(3)}, horizon=1, quantiles=3)
+
+    def test_factor_can_evaluate_real_ohlcv_frame(self):
+        close = make_close(days=80)
+        frame = pd.DataFrame({"open": close * .99, "high": close * 1.01, "low": close * .98, "close": close, "volume": np.arange(len(close)) + 100, "amount": (np.arange(len(close)) + 100) * close}, index=close.index)
+        fn = compile_factor("def factor(df): return (df['high'] - df['low']) / df['close'] + df['volume'].pct_change()")
+        value = fn(frame)
+        self.assertIsInstance(value, pd.Series)
+        self.assertIn("volume", fn.required_columns)
 
     def test_momentum_factor_has_positive_ic_on_drifting_data(self):
         closes = {f"S{i}": make_close(seed=i) for i in range(6)}
