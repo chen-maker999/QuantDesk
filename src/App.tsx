@@ -20,12 +20,14 @@ import { forgetRun, cancelAgentRun, getQueue, getRunInfo, hasUnreadRun, isThread
 import { AlertsCard, FactorResearchCard, NotificationsCard, PortfolioBacktestCard } from "./research";
 import { MarketPage, NewsPage, RankingsPage, StockPage, ViewNewsStrip, type StockTarget } from "./market";
 import { PaperTradePage } from "./papertrade";
+import { BrokerOmsPage } from "./brokeroms";
+import { configureBrokerEngine, hasBrokerCredentials, type BrokerId } from "./lib/brokers";
 import { getQuotes, searchSymbols } from "./lib/market";
 import { getPositions } from "./lib/trade";
 import altasLight from "./assets/altas-light.png";
 import altasDark from "./assets/altas-dark.png";
 
-type PageId="agent"|"overview"|"sessions"|"models"|"backtest"|"data"|"portfolio"|"risk"|"browser"|"tasks"|"settings"|"market"|"rankings"|"news"|"stock"|"papertrade";
+type PageId="agent"|"overview"|"sessions"|"models"|"backtest"|"data"|"portfolio"|"risk"|"browser"|"tasks"|"settings"|"market"|"rankings"|"news"|"stock"|"papertrade"|"brokeroms";
 type Theme="light"|"dark"|"system";
 type Notify=(message:string,tone?:"ok"|"error")=>void;
 type ApiProvider="OpenAI"|"DeepSeek"|"Qwen"|"AlphaVantage"|"Tushare";
@@ -60,12 +62,13 @@ const pageTitles:Record<PageId,{title:string;subtitle:string}>={
   news:{title:"新闻资讯",subtitle:"东方财富财经快讯"},
   stock:{title:"个股详情",subtitle:"实时行情与 K 线"},
   papertrade:{title:"模拟交易",subtitle:"股票与期货模拟盘：下单、持仓、委托与成交"},
+  brokeroms:{title:"实盘 OMS",subtitle:"IBKR 与 Alpaca：账户、持仓、订单与受控下单"},
 };
 const navGroups=[
   {label:"工作台",items:[{id:"agent" as PageId,label:"投资 Agent",icon:Bot},{id:"overview" as PageId,label:"工作区",icon:LayoutDashboard},{id:"sessions" as PageId,label:"对话历史",icon:Clock3}]},
   {label:"行情中心",items:[{id:"market" as PageId,label:"大盘",icon:BarChart3},{id:"news" as PageId,label:"新闻",icon:Newspaper}]},
   {label:"量化工具",items:[{id:"models" as PageId,label:"算法工具",icon:BrainCircuit},{id:"backtest" as PageId,label:"策略回测",icon:FlaskConical},{id:"data" as PageId,label:"数据中心",icon:Database}]},
-  {label:"投资管理",items:[{id:"portfolio" as PageId,label:"投资组合",icon:BriefcaseBusiness},{id:"papertrade" as PageId,label:"模拟交易",icon:Landmark},{id:"risk" as PageId,label:"风险中心",icon:ShieldCheck}]},
+  {label:"投资管理",items:[{id:"portfolio" as PageId,label:"投资组合",icon:BriefcaseBusiness},{id:"papertrade" as PageId,label:"模拟交易",icon:Landmark},{id:"brokeroms" as PageId,label:"实盘 OMS",icon:ShieldCheck},{id:"risk" as PageId,label:"风险中心",icon:ShieldCheck}]},
   {label:"效率工具",items:[{id:"browser" as PageId,label:"内置浏览器",icon:Globe},{id:"tasks" as PageId,label:"定时任务",icon:CalendarClock}]},
 ];
 type ViewDef={key:string;page:PageId;title:string;subtitle:string;row:"top"|"bottom";stock?:StockTarget;stockFrom?:PageId};
@@ -422,7 +425,7 @@ function LegacySettingsPage({theme,setTheme,onApiKey,status,model,setModel,notif
   return <div className="page-body settings-page fade-in"><aside className="settings-nav">{[["general","通用"],["agent","Agent 与模型"],["safety","安全边界"],["notifications","通知"]].map(([id,label])=><button key={id} className={section===id?"active":""} onClick={()=>setSection(id)}>{label}</button>)}</aside><div className="settings-content">
     {section==="general"&&<><section><h2>外观</h2><p>选择应用主题。</p><div className="theme-options"><button className={theme==="light"?"active":""} onClick={()=>setTheme("light")}><span className="theme-preview light-preview"><i/><i/><i/></span><CheckCircle2/>浅色</button><button className={theme==="dark"?"active":""} onClick={()=>setTheme("dark")}><span className="theme-preview dark-preview"><i/><i/><i/></span><CheckCircle2/>深色</button></div></section><section><h2>启动</h2><div className="settings-row"><span><strong>启动时运行 Agent 引擎</strong><small>控制下一次桌面应用启动时是否自动加载本地引擎</small></span><button className={`toggle ${autostart?"on":""}`} onClick={()=>toggle("quant-autostart",!autostart,setAutostart)}><i/></button></div></section></>}
     {section==="agent"&&<><section><h2>模型 API</h2><p>各提供商密钥独立加密保存在 Windows Credential Manager。</p><div className="provider-key-list"><div className="settings-row"><span><strong>OpenAI</strong><small>{status.agent_configured?"已连接":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("OpenAI")}><KeyRound size={13}/>配置</button></div><div className="settings-row"><span><strong>DeepSeek</strong><small>{status.deepseek_configured?"已连接":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("DeepSeek")}><KeyRound size={13}/>配置</button></div><div className="settings-row"><span><strong>Qwen / 阿里云百炼</strong><small>{status.qwen_configured?"已连接":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("Qwen")}><KeyRound size={13}/>配置</button></div></div></section><section><h2>行情数据 API</h2><p>行情凭据独立保存，不会发送给模型提供商。</p><div className="provider-key-list"><div className="settings-row"><span><strong>Alpha Vantage</strong><small>{status.market_provider_configured?"已连接，全球股票与外汇日线":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("AlphaVantage")}><KeyRound size={13}/>配置</button></div><div className="settings-row"><span><strong>Tushare Pro</strong><small>{status.tushare_configured?"已连接，A 股与国内期货日线":"尚未配置；期货接口需要相应积分权限"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("Tushare")}><KeyRound size={13}/>配置</button></div></div></section><section><h2>默认模型</h2><label className="real-select">Agent 模型<select value={model} onChange={e=>{setModel(e.target.value);localStorage.setItem("quant-model",e.target.value);notify("模型已切换")}}><optgroup label="OpenAI"><option value="gpt-5.4-mini">gpt-5.4-mini</option><option value="gpt-5.5">gpt-5.5</option></optgroup><optgroup label="DeepSeek"><option value="deepseek-v4-flash">DeepSeek V4 Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro</option></optgroup><optgroup label="Qwen"><option value="qwen3.7-flash">Qwen 3.7 Flash</option><option value="qwen3.7-plus">Qwen 3.7 Plus</option><option value="qwen3.8-max">Qwen 3.8 Max</option></optgroup></select></label></section></>}
-    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><X/>真实券商下单工具未安装</div><div><X/>Agent 无法读取已保存密钥的明文</div></div></section>}
+    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><AlertTriangle/>真实券商仅在 OMS 页面手动操作，默认模拟且真实模式需会话解锁</div><div><X/>Agent 无法读取已保存密钥的明文，也没有真实下单工具</div></div></section>}
     {section==="notifications"&&<section><h2>通知</h2><div className="settings-row"><span><strong>任务完成通知</strong><small>Agent 完成或失败时在应用内提示</small></span><button className={`toggle ${notifications?"on":""}`} onClick={()=>toggle("quant-notifications",!notifications,setNotifications)}><i/></button></div></section>}
   </div></div>;
 }
@@ -472,7 +475,7 @@ function SettingsPage({theme,setTheme,onApiKey,status,model,setModel,notify,onOp
       <section><h2>模型与行为</h2><div className="settings-choice-grid"><label className="real-select">默认模型<select value={model} onChange={event=>{setModel(event.target.value);localStorage.setItem("quant-model",event.target.value);notify("模型已切换")}}><optgroup label="OpenAI"><option value="gpt-5.4-mini">gpt-5.4-mini</option><option value="gpt-5.5">gpt-5.5</option></optgroup><optgroup label="DeepSeek"><option value="deepseek-v4-flash">DeepSeek V4 Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro</option></optgroup><optgroup label="Qwen"><option value="qwen3.7-flash">Qwen 3.7 Flash</option><option value="qwen3.7-plus">Qwen 3.7 Plus</option><option value="qwen3.8-max">Qwen 3.8 Max</option></optgroup></select></label><label className="real-select">回答详略<select value={verbosity} onChange={event=>saveChoice("quant-verbosity",event.target.value,setVerbosity)}><option value="concise">简洁</option><option value="balanced">平衡</option><option value="detailed">详细</option></select></label><label className="real-select">表达风格<select value={personality} onChange={event=>saveChoice("quant-personality",event.target.value,setPersonality)}><option value="professional">专业审慎</option><option value="direct">直接务实</option><option value="teaching">教学解释</option></select></label></div><label className="real-select" style={{marginTop:10}}>默认权限<select value={defaultAccess} onChange={event=>{const value=event.target.value as AccessMode;setDefaultAccess(value);localStorage.setItem("quant-access-mode",value);notify("默认权限已更新")}}><option value="ask">只读提案</option><option value="approve">待批准提案</option><option value="full">完全访问</option></select></label>{defaultAccess==="full"&&<small className="access-full-hint">完全访问可执行受控本地写操作，仍不能真实下单</small>}<div className="settings-row"><span><strong>显示建议任务</strong><small>在新任务页显示基于工作区的快捷提示</small></span><button className={`toggle ${suggestions?"on":""}`} onClick={()=>toggle("quant-suggestions",!suggestions,setSuggestions)}><i/></button></div></section>
       <section><h2>自定义指令</h2><p>每次任务都会附加到 Agent 上下文；不要在此填写 API Key。</p><textarea className="settings-textarea" value={customInstructions} onChange={event=>setCustomInstructions(event.target.value)} onBlur={()=>{localStorage.setItem("quant-custom-instructions",customInstructions);notify("自定义指令已保存")}} placeholder="例如：默认使用人民币计价；所有建议必须列出数据日期与主要风险。"/></section>
     </>}
-    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><X/>真实券商下单工具未安装</div><div><X/>Agent 无法读取已保存密钥的明文</div></div></section>}
+    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><AlertTriangle/>真实券商仅在 OMS 页面手动操作，默认模拟且真实模式需会话解锁</div><div><X/>Agent 无法读取已保存密钥的明文，也没有真实下单工具</div></div></section>}
     {section==="notifications"&&<section><h2>通知</h2><div className="settings-row"><span><strong>任务完成通知</strong><small>Agent 完成或失败时在应用内提示</small></span><button className={`toggle ${notifications?"on":""}`} onClick={()=>toggle("quant-notifications",!notifications,setNotifications)}><i/></button></div><div className="settings-row"><span><strong>系统通知</strong><small>预警触发与任务完成时弹出 Windows 通知</small></span><button className="secondary-btn" onClick={()=>{if("Notification" in window)void Notification.requestPermission().then(p=>notify(p==="granted"?"已允许系统通知":"系统通知被拒绝","ok"))}}>申请权限</button></div><label className="real-select" style={{marginTop:10}}>Webhook 推送<input className="settings-text" type="text" value={webhookUrl} onChange={e=>setWebhookUrl(e.target.value)} placeholder="https://example.com/hook（留空关闭）"/></label><button className="secondary-btn" style={{marginTop:8}} onClick={()=>{setWebhook(webhookUrl.trim()).then(()=>notify("Webhook 已保存")).catch((e:unknown)=>notify(e instanceof Error?e.message:"保存失败","error"))}}><Check size={13}/>保存 Webhook</button></section>}
   </div></div>;
 }
@@ -976,6 +979,9 @@ export default function App(){
     const providers:ApiProvider[]=["OpenAI","DeepSeek","Qwen","AlphaVantage","Tushare"];
     const stored=(await Promise.all(providers.map(async provider=>({provider,stored:await hasApiKey(provider).catch(()=>false)})))).filter(item=>item.stored);
     await Promise.allSettled(stored.map(item=>configureEngine(item.provider)));
+    const brokers:BrokerId[]=["alpaca","ibkr"];
+    const storedBrokers=(await Promise.all(brokers.map(async broker=>({broker,stored:await hasBrokerCredentials(broker).catch(()=>false)})))).filter(item=>item.stored);
+    await Promise.allSettled(storedBrokers.map(item=>configureBrokerEngine(item.broker)));
     await refresh();
   };
   // 定时任务的执行已迁到引擎侧(见 engine/main.py _run_agent_headless / POST /scheduler/tasks/{id}/run):
@@ -1050,6 +1056,7 @@ export default function App(){
     if(av.page==="news")return <NewsPage onOpenExternal={openUrlInBrowser}/>;
     if(av.page==="stock")return av.stock?<StockPage target={av.stock} onBack={()=>{const from=av.stockFrom||"market";if(av.key==="main")setPage(from);else setViews(prev=>prev.map(v=>v.key===av.key?{...v,page:from,stock:undefined}:v))}} onOpenStock={onOpenStock}/>:<MarketPage onOpenStock={onOpenStock}/>;
     if(av.page==="papertrade")return <PaperTradePage notify={notify}/>;
+    if(av.page==="brokeroms")return <BrokerOmsPage notify={notify}/>;
     return <SettingsPage theme={theme} setTheme={setTheme} onApiKey={setKeyModal} status={status} model={model} setModel={setModel} notify={notify} onOpenExternal={openUrlInBrowser}/>;
   },[status,draft,model,theme,tasks,ctxCollapsed,activeChatId,openUrlInBrowser]);
   const topAdded=views.filter(v=>v.row==="top");

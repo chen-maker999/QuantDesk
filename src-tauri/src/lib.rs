@@ -89,6 +89,40 @@ async fn configure_engine(
     Ok(())
 }
 
+/// 券商凭据由 Windows Credential Manager 保管。仅在当前桌面进程通过本地回环
+/// 鉴权交给引擎，绝不落入 SQLite、日志或前端状态。
+#[tauri::command]
+async fn configure_broker_engine(
+    broker: String,
+    token_state: tauri::State<'_, EngineToken>,
+) -> Result<(), String> {
+    let service = match broker.as_str() {
+        "alpaca" => "BrokerAlpaca",
+        "ibkr" => "BrokerIBKR",
+        _ => return Err("Unsupported broker".into()),
+    };
+    let entry = keyring::Entry::new("QuantDesk", service).map_err(|e| e.to_string())?;
+    let raw_credentials = entry.get_password().map_err(|e| e.to_string())?;
+    let credentials: serde_json::Value = serde_json::from_str(&raw_credentials)
+        .map_err(|_| "Broker credential is invalid; please configure it again".to_string())?;
+    let token = token_state
+        .0
+        .lock()
+        .map_err(|_| "Engine token state is unavailable")?
+        .clone()
+        .ok_or_else(|| "本地引擎尚未由当前应用启动".to_string())?;
+    reqwest::Client::new()
+        .post("http://127.0.0.1:8765/brokers/configure")
+        .header("X-QuantDesk-Token", token)
+        .json(&serde_json::json!({"broker": broker, "credentials": credentials}))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn start_engine(
     app: tauri::AppHandle,
@@ -573,6 +607,7 @@ pub fn run() {
             has_api_key,
             delete_api_key,
             configure_engine,
+            configure_broker_engine,
             start_engine,
             engine_token,
             browser_open,

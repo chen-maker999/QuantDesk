@@ -108,6 +108,16 @@ except ImportError:
         from papertrade import _account_snapshot, _list_orders, _list_trades, cancel_order, get_risk_limits as get_paper_risk_limits, place_order as place_paper_order, process_pending_orders, update_risk_limits as update_paper_risk_limits
 app.include_router(papertrade_router)
 
+# 实盘 OMS 独立路由：不向 Agent 暴露下单工具，券商凭据只留在引擎进程内存。
+try:
+    from .brokers import router as broker_router
+except ImportError:
+    try:
+        from engine.brokers import router as broker_router
+    except ImportError:
+        from brokers import router as broker_router
+app.include_router(broker_router)
+
 try:
     from .scheduler import router as scheduler_router
     from .scheduler import delete_scheduled_task as db_delete_task, get_scheduled_task as db_get_task, list_scheduled_tasks as db_list_tasks, upsert_scheduled_task as db_upsert_task
