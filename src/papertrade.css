@@ -1,0 +1,61 @@
+/* 模拟交易 — 股票 + 期货。沿用既有 CSS 变量与 .tone-up(红)/.tone-down(绿) 语义。 */
+
+.paper-page { padding-bottom: 18px; }
+
+.paper-actions { display: flex; align-items: center; gap: 7px; }
+.paper-actions .secondary-btn.danger { border-color: var(--red); color: var(--red); }
+
+/* ---------- 资产头 ---------- */
+.paper-asset-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px; margin-bottom: 14px;
+}
+.paper-stat { padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+.paper-stat small { font-size: 9px; color: var(--muted); }
+.paper-stat strong { font-size: 17px; letter-spacing: -.3px; line-height: 1.2; }
+.paper-stat em { font-style: normal; font-size: 8px; color: var(--faint); }
+
+/* ---------- 布局: 表单 | 列表 ---------- */
+.paper-layout { display: grid; grid-template-columns: 330px 1fr; gap: 12px; align-items: start; }
+@media (max-width: 1080px) { .paper-layout { grid-template-columns: 1fr; } }
+
+.paper-trade-form { padding: 14px 15px; display: flex; flex-direction: column; gap: 11px; }
+.paper-form-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+.paper-form-head h3 { margin: 0; font-size: 11px; }
+
+.paper-field { display: flex; flex-direction: column; gap: 6px; font-size: 9px; color: var(--muted); }
+.paper-field input {
+  height: 31px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel-2); color: var(--text); padding: 0 10px; font-size: 10px; outline: 0;
+}
+.paper-field input:focus { border-color: var(--line-strong); }
+.paper-field input:disabled { opacity: .5; }
+
+.paper-symbol { width: 100%; }
+.paper-fut-inputs { display: grid; grid-template-columns: 1.4fr 1fr; gap: 7px; }
+
+.paper-sides .side-up.active { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+.paper-sides .side-down.active { border-color: var(--green); color: var(--green); background: var(--green-soft); }
+
+.paper-num-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.paper-submit { width: 100%; justify-content: center; margin-top: 2px; }
+.paper-hint { margin: 0; font-size: 8px; color: var(--faint); line-height: 1.55; }
+
+/* ---------- 列表区 ---------- */
+.paper-lists { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.paper-list-tabs b { font-weight: 600; opacity: .7; margin-left: 3px; }
+.paper-table-wrap { flex: 1; min-height: 260px; }
+
+.paper-time { font-size: 8px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.paper-muted { color: var(--faint); }
+.paper-empty { padding: 34px 0; text-align: center; color: var(--faint); font-size: 10px; }
+
+.paper-status {
+  display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 8px;
+}
+.paper-status.st-orange { background: var(--orange-soft); color: var(--orange); }
+.paper-status.st-green { background: var(--green-soft); color: var(--green); }
+.paper-status.st-muted { background: var(--panel-2); color: var(--muted); }
+
+.paper-pre { height: 24px !important; padding: 0 8px !important; font-size: 8px !important; }
