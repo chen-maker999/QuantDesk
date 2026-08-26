@@ -17,7 +17,9 @@
 .broker-config input,.broker-config select,.broker-order input,.broker-order select,.broker-arm input { width:100%; min-width:0; height:32px; box-sizing:border-box; border:1px solid var(--line); border-radius:7px; background:var(--panel); color:var(--text); padding:0 9px; outline:0; }
 .broker-config input:focus,.broker-config select:focus,.broker-order input:focus,.broker-order select:focus,.broker-arm input:focus { border-color:var(--faint); }
 .broker-inline { align-items:end; margin-top:8px; }
-.broker-inline label { flex:1; }
+.broker-inline label { flex:1; display:grid; gap:5px; font-size:9px; color:var(--muted); }
+.broker-inline input,.broker-inline select { font-size:9px; }
+.broker-inline-single label { flex:0 0 calc(50% - 5px); }
 .broker-actions { justify-content:flex-end; margin-top:12px; }
 .broker-note { margin-top:9px!important; padding:7px 9px; border-left:2px solid var(--line-strong); background:var(--panel-2); color:var(--muted)!important; }
 .broker-safety { background:var(--panel-2); }
