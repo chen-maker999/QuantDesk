@@ -35,6 +35,13 @@ class SecurityBoundaryTest(unittest.TestCase):
         self.assertEqual(result["requested_years"], 1)
         self.assertLess(result["observations"], 270)
 
+    def test_read_only_factor_research_does_not_save_experiment(self):
+        series = {f"S{i}": [(day, float(10 + index + i)) for index, day in enumerate(pd.bdate_range("2024-01-01", periods=100).strftime("%Y-%m-%d"))] for i in range(3)}
+        with patch.object(main, "_price_series", return_value=series), patch.object(main, "read_analysis_bars", return_value=[]), patch.object(main, "evaluate_factor", return_value={"available": True, "symbols": ["S0", "S1", "S2"], "ic_mean": .1, "ic_ir": .2}), patch.object(main, "save_experiment") as save:
+            _, _, output = main._tool_result("run_factor_research", {"code": "def factor(df): return df['close'].pct_change(5)"}, "ask")
+        self.assertIn('"available": true', output)
+        save.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

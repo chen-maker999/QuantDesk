@@ -1,7 +1,7 @@
 import unittest
 
 from engine import database
-from engine.main import MarketPriceRow
+from engine.main import MarketPriceRow, _market_data_manifest
 
 
 class AnalysisBarLineageTest(unittest.TestCase):
@@ -9,6 +9,7 @@ class AnalysisBarLineageTest(unittest.TestCase):
         database.initialize()
         with database.connect() as db:
             db.execute("DELETE FROM analysis_bars")
+            db.execute("DELETE FROM market_prices")
 
     def test_persists_real_ohlcv_with_provenance(self):
         database.upsert_analysis_bars([{
@@ -35,6 +36,16 @@ class AnalysisBarLineageTest(unittest.TestCase):
             MarketPriceRow(symbol="600519", date="2025/01/02", close=10)
         with self.assertRaises(ValueError):
             MarketPriceRow(symbol="600519", date="2025-01-02", close=10, open=9, high=8)
+
+    def test_manifest_changes_when_market_data_changes(self):
+        with database.connect() as db:
+            db.execute("INSERT INTO market_prices(symbol,trade_date,close,source) VALUES(?,?,?,?)", ("AAA", "2025-01-02", 10.0, "csv"))
+        first = _market_data_manifest(["AAA"])
+        with database.connect() as db:
+            db.execute("UPDATE market_prices SET close=? WHERE symbol=? AND trade_date=?", (11.0, "AAA", "2025-01-02"))
+        second = _market_data_manifest(["AAA"])
+        self.assertEqual(first["market_prices"]["symbols"][0]["sources"], ["csv"])
+        self.assertNotEqual(first["fingerprint"], second["fingerprint"])
 
 
 if __name__ == "__main__":

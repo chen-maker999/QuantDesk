@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -518,6 +519,50 @@ def _price_series() -> dict[str, list[tuple[str, float]]]:
     return series
 
 
+def _market_data_manifest(symbols: list[str] | None = None) -> dict[str, Any]:
+    """为研究实验记录数据集血缘和内容指纹，不把原始行情重复写进实验表。"""
+    selected = sorted({str(symbol).strip().upper() for symbol in symbols or [] if str(symbol).strip()})
+    clause = ""
+    params: list[Any] = []
+    if selected:
+        clause = f" WHERE symbol IN ({','.join('?' for _ in selected)})"
+        params = selected
+    with connect() as db:
+        prices = [tuple(row) for row in db.execute(f"SELECT symbol,trade_date,close,source FROM market_prices{clause} ORDER BY symbol,trade_date", params).fetchall()]
+        bars = [tuple(row) for row in db.execute(f"SELECT symbol,trade_date,market,adjust,source,open,high,low,close,volume,amount FROM analysis_bars{clause} ORDER BY symbol,trade_date", params).fetchall()]
+
+    def digest(rows: list[tuple[Any, ...]]) -> str:
+        payload = "\n".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) for row in rows)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def summary(rows: list[tuple[Any, ...]], *, is_bar: bool) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            symbol, trade_date = str(row[0]), str(row[1])
+            item = grouped.setdefault(symbol, {"symbol": symbol, "rows": 0, "start": trade_date, "end": trade_date, "sources": set(), "adjustments": set()})
+            item["rows"] += 1
+            item["start"] = min(item["start"], trade_date)
+            item["end"] = max(item["end"], trade_date)
+            item["sources"].add(str(row[4] if is_bar else row[3]))
+            if is_bar:
+                item["adjustments"].add(str(row[3]))
+        return [{**item, "sources": sorted(item["sources"]), "adjustments": sorted(item["adjustments"])} for _, item in sorted(grouped.items())]
+
+    manifest = {
+        "algorithm": "sha256",
+        "selected_symbols": selected or None,
+        "market_prices": {"rows": len(prices), "digest": digest(prices), "symbols": summary(prices, is_bar=False)},
+        "analysis_bars": {"rows": len(bars), "digest": digest(bars), "symbols": summary(bars, is_bar=True)},
+    }
+    manifest["fingerprint"] = hashlib.sha256(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return manifest
+
+
+def _save_reproducible_experiment(kind: str, name: str, config: dict[str, Any], result: dict[str, Any], symbols: list[str] | None = None) -> int:
+    stored_config = {**config, "data_manifest": _market_data_manifest(symbols)}
+    return save_experiment(kind, name, stored_config, result)
+
+
 def _factor_inputs() -> dict[str, pd.Series | pd.DataFrame]:
     """因子研究优先读取可追溯的真实 OHLCV；其余来源只保留真实 close。"""
     inputs: dict[str, pd.Series | pd.DataFrame] = {
@@ -945,6 +990,8 @@ def _tool_result(name: str, arguments: dict[str, Any], access_mode: str = "ask")
         trained = [s for s, m in result["models"].items() if m.get("available")]
         if not trained:
             return "运行集成预测", "样本不足，未完成训练", json.dumps(result, ensure_ascii=False)
+        if access_mode == "full":
+            result["experiment_id"] = _save_reproducible_experiment("alpha_ensemble", "AlphaEnsemble 预测", {"predict_ahead": result["predict_ahead"], "model": result["method"]}, result, trained)
         return "运行集成预测", f"已训练 {len(trained)} 个标的的异构集成模型", json.dumps(result, ensure_ascii=False)
     if name == "optimize_current_portfolio":
         with connect() as db:
@@ -1174,8 +1221,10 @@ def _tool_result(name: str, arguments: dict[str, Any], access_mode: str = "ask")
             panel, _ = build_panels(series, min_rows=60)
             result = evaluate_factor(factor_fn, _factor_inputs(), horizon=horizon, quantiles=quantiles)
             result["factor_name"] = str(arguments.get("name") or "custom_factor")
-            experiment_id = save_experiment("factor_research", result["factor_name"], {"code": code[:2000], "horizon": horizon, "quantiles": quantiles}, {k: v for k, v in result.items() if k != "ic_series_tail"})
-            audit("factor_evaluated", {"experiment_id": experiment_id, "symbols": len(result.get("symbols", [])), "ic_mean": result.get("ic_mean")})
+            if access_mode == "full":
+                experiment_id = _save_reproducible_experiment("factor_research", result["factor_name"], {"code": code[:2000], "horizon": horizon, "quantiles": quantiles}, {k: v for k, v in result.items() if k != "ic_series_tail"}, result.get("symbols"))
+                result["experiment_id"] = experiment_id
+                audit("factor_evaluated", {"experiment_id": experiment_id, "symbols": len(result.get("symbols", [])), "ic_mean": result.get("ic_mean")})
             return "因子研究", f"IC 均值 {result.get('ic_mean')} · ICIR {result.get('ic_ir')} · {len(result.get('symbols', []))} 标的", json.dumps(result, ensure_ascii=False)
         except FactorCodeError as exc:
             return "因子研究", "因子无效", json.dumps({"available": False, "reason": str(exc)}, ensure_ascii=False)
@@ -1200,8 +1249,10 @@ def _tool_result(name: str, arguments: dict[str, Any], access_mode: str = "ask")
                 cost_bps=float(arguments.get("cost_bps") or 12.0),
                 slippage_bps=float(arguments.get("slippage_bps") or 5.0),
             )
-            experiment_id = save_experiment("portfolio_backtest", "组合再平衡回测", {"weights": weights}, {k: v for k, v in result.items() if k not in ("nav", "benchmark_nav")})
-            audit("portfolio_backtest_completed", {"experiment_id": experiment_id, "symbols": len(closes)})
+            if access_mode == "full":
+                experiment_id = _save_reproducible_experiment("portfolio_backtest", "组合再平衡回测", {"weights": weights}, {k: v for k, v in result.items() if k not in ("nav", "benchmark_nav")}, result.get("symbols"))
+                result["experiment_id"] = experiment_id
+                audit("portfolio_backtest_completed", {"experiment_id": experiment_id, "symbols": len(closes)})
             m = result["metrics"]
             return "组合回测", f"年化 {m['annual_return']} · 夏普 {m['sharpe']} · 回撤 {m['max_drawdown']}", json.dumps(result, ensure_ascii=False)
         except BacktestDataError as exc:
@@ -1856,7 +1907,9 @@ def import_holdings(request: HoldingsImportRequest) -> dict[str, Any]:
 def create_backtest(request: BacktestRequest) -> dict[str, Any]:
     try:
         result = backtest_signal(request.returns, request.signals, request.cost_bps)
-        result["experiment_id"] = save_experiment("backtest", "Imported signal backtest", request.model_dump(), result)
+        payload = request.model_dump()
+        payload["input_fingerprint"] = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        result["experiment_id"] = save_experiment("backtest", "Imported signal backtest", payload, result)
         audit("backtest_completed", {"experiment_id": result["experiment_id"]})
         return result
     except ValueError as exc:
@@ -1867,6 +1920,9 @@ def create_backtest(request: BacktestRequest) -> dict[str, Any]:
 def run_ensemble(request: EnsembleRequest) -> dict[str, Any]:
     """在已导入的真实价格数据上训练异构集成预测模型(引擎侧直接调用 / 前端 Models 页)。"""
     result = _ensemble_analysis(request.symbol, request.predict_ahead)
+    trained = [symbol for symbol, model in result.get("models", {}).items() if model.get("available")]
+    if trained:
+        result["experiment_id"] = _save_reproducible_experiment("alpha_ensemble", "AlphaEnsemble 预测", {"predict_ahead": request.predict_ahead, "model": result["method"]}, result, trained)
     audit("ensemble_predicted", {"available": result.get("available", False), "symbols": result.get("symbols", [])})
     return result
 
@@ -1898,7 +1954,7 @@ def evaluate_custom_factor(request: FactorEvaluateRequest) -> dict[str, Any]:
         panel, _ = build_panels(_price_series(), min_rows=60)
         result = evaluate_factor(factor_fn, _factor_inputs(), horizon=request.horizon, quantiles=request.quantiles)
         result["factor_name"] = request.name
-        experiment_id = save_experiment("factor_research", request.name, {"code": request.code[:2000], "horizon": request.horizon, "quantiles": request.quantiles}, {k: v for k, v in result.items() if k != "ic_series_tail"})
+        experiment_id = _save_reproducible_experiment("factor_research", request.name, {"code": request.code[:2000], "horizon": request.horizon, "quantiles": request.quantiles}, {k: v for k, v in result.items() if k != "ic_series_tail"}, result.get("symbols"))
         audit("factor_evaluated", {"experiment_id": experiment_id, "symbols": len(result.get("symbols", []))})
         return result
     except (FactorCodeError, ValueError) as exc:
@@ -1918,7 +1974,7 @@ def backtest_portfolio(request: PortfolioBacktestRequest) -> dict[str, Any]:
         if not closes:
             raise HTTPException(409, "给定标的均无本地价格，请先导入数据")
         result = run_portfolio_backtest(closes, weights, request.rebalance_days, request.cost_bps, request.slippage_bps)
-        experiment_id = save_experiment("portfolio_backtest", "组合再平衡回测", {"weights": weights}, {k: v for k, v in result.items() if k not in ("nav", "benchmark_nav")})
+        experiment_id = _save_reproducible_experiment("portfolio_backtest", "组合再平衡回测", {"weights": weights}, {k: v for k, v in result.items() if k not in ("nav", "benchmark_nav")}, result.get("symbols"))
         audit("portfolio_backtest_completed", {"experiment_id": experiment_id, "symbols": len(closes)})
         return result
     except BacktestDataError as exc:
