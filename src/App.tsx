@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Activity, AlertTriangle, ArrowRight, ArrowUpRight, BarChart3, Bell, Bot, BrainCircuit, BriefcaseBusiness,
+  Activity, AlertTriangle, ArrowRight, ArrowUpRight, BarChart3, Bell, Bot, BrainCircuit, BriefcaseBusiness, Cable,
   CalendarClock, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
   ChevronsRight, Circle, Clock3, Command, Database, ExternalLink, FileDown, FileUp, FlaskConical, Gauge, Globe, Landmark,
   Copy, KeyRound, LayoutDashboard, ListOrdered, Menu, Minus, Moon, MoreHorizontal, Newspaper, Pause, Play, Plus, RefreshCw, Search, Unlock,
@@ -68,7 +68,7 @@ const navGroups=[
   {label:"工作台",items:[{id:"agent" as PageId,label:"投资 Agent",icon:Bot},{id:"overview" as PageId,label:"工作区",icon:LayoutDashboard},{id:"sessions" as PageId,label:"对话历史",icon:Clock3}]},
   {label:"行情中心",items:[{id:"market" as PageId,label:"大盘",icon:BarChart3},{id:"news" as PageId,label:"新闻",icon:Newspaper}]},
   {label:"量化工具",items:[{id:"models" as PageId,label:"算法工具",icon:BrainCircuit},{id:"backtest" as PageId,label:"策略回测",icon:FlaskConical},{id:"data" as PageId,label:"数据中心",icon:Database}]},
-  {label:"投资管理",items:[{id:"portfolio" as PageId,label:"投资组合",icon:BriefcaseBusiness},{id:"papertrade" as PageId,label:"模拟交易",icon:Landmark},{id:"brokeroms" as PageId,label:"实盘 OMS",icon:ShieldCheck},{id:"risk" as PageId,label:"风险中心",icon:ShieldCheck}]},
+  {label:"投资管理",items:[{id:"portfolio" as PageId,label:"投资组合",icon:BriefcaseBusiness},{id:"papertrade" as PageId,label:"模拟交易",icon:Landmark},{id:"brokeroms" as PageId,label:"实盘 OMS",icon:Cable},{id:"risk" as PageId,label:"风险中心",icon:ShieldCheck}]},
   {label:"效率工具",items:[{id:"browser" as PageId,label:"内置浏览器",icon:Globe},{id:"tasks" as PageId,label:"定时任务",icon:CalendarClock}]},
 ];
 type ViewDef={key:string;page:PageId;title:string;subtitle:string;row:"top"|"bottom";stock?:StockTarget;stockFrom?:PageId};
