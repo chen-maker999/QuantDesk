@@ -14,6 +14,8 @@
 .paper-stat small { font-size: 9px; color: var(--muted); }
 .paper-stat strong { font-size: 17px; letter-spacing: -.3px; line-height: 1.2; }
 .paper-stat em { font-style: normal; font-size: 8px; color: var(--faint); }
+.paper-risk-policy { margin: -4px 0 14px; padding: 9px 12px; display: flex; gap: 9px; align-items: baseline; font-size: 9px; color: var(--muted); }
+.paper-risk-policy b { color: var(--text); white-space: nowrap; font-size: 10px; }
 
 /* ---------- 布局: 表单 | 列表 ---------- */
 .paper-layout { display: grid; grid-template-columns: 330px 1fr; gap: 12px; align-items: start; }

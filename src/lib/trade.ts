@@ -12,6 +12,11 @@ export type PaperAccount = {
   initial_cash: number; cash: number; realized_pnl: number;
   unrealized_pnl: number; market_value: number; total_asset: number;
   day_pnl: number; positions_count: number;
+  risk_limits?: PaperRiskLimits;
+};
+export type PaperRiskLimits = {
+  max_order_notional_pct: number; max_single_position_pct: number; max_gross_exposure_pct: number;
+  max_futures_margin_pct: number; max_pending_orders: number;
 };
 export type PaperOrder = {
   id: number; market: string; symbol: string; name: string | null;
@@ -27,7 +32,7 @@ export type OrderPayload = {
   market?: string; symbol: string; name?: string; side: string;
   order_type?: "market" | "limit"; price?: number | null; quantity: number;
 };
-export type OrderResp = { ok: boolean; error?: string; order_id?: number; status?: string; reason?: string; price?: number; fee?: number; realized_pnl?: number };
+export type OrderResp = { ok: boolean; error?: string; order_id?: number; status?: string; reason?: string; price?: number; fee?: number; realized_pnl?: number; risk?: Record<string, unknown> };
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await engineFetch(path, init);
@@ -39,6 +44,8 @@ const jsonInit = (body: unknown): RequestInit => ({
 });
 
 export const getAccount = (): Promise<PaperAccount> => j("/trade/account");
+export const getRiskLimits = (): Promise<{ ok: boolean; limits: PaperRiskLimits }> => j("/trade/risk-limits");
+export const updateRiskLimits = (limits: Partial<PaperRiskLimits>): Promise<{ ok: boolean; error?: string; limits?: PaperRiskLimits }> => j("/trade/risk-limits", jsonInit(limits));
 export const getPositions = (): Promise<{ ok: boolean; error?: string; positions: PaperPosition[]; market_value: number; unrealized_pnl: number }> => j("/trade/positions");
 export const getOrders = (status = ""): Promise<{ ok: boolean; error?: string; orders: PaperOrder[] }> => j(`/trade/orders${status ? `?status=${status}` : ""}`);
 export const getTrades = (limit = 50): Promise<{ ok: boolean; error?: string; trades: PaperTrade[] }> => j(`/trade/trades?limit=${limit}`);

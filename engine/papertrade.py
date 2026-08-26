@@ -11,18 +11,19 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import math
 from typing import Any
 
 from fastapi import APIRouter, Body
 
 try:  # 兼容 dev 与打包产物
-    from .database import audit, connect, get_setting
+    from .database import audit, connect, get_setting, set_setting
 except ImportError:
     try:
-        from engine.database import audit, connect, get_setting
+        from engine.database import audit, connect, get_setting, set_setting
     except ImportError:
-        from database import audit, connect, get_setting
+        from database import audit, connect, get_setting, set_setting
 
 try:
     from .marketdata import market_quotes
@@ -37,10 +38,123 @@ router = APIRouter(prefix="/trade")
 INITIAL_CASH = 1_000_000.0
 FUTURES_MARGIN = 0.12  # 期货保证金率
 SIDES = {"buy", "sell", "open_long", "open_short", "close_long", "close_short"}
+RISK_LIMITS_KEY = "paper_risk_limits"
+DEFAULT_RISK_LIMITS = {
+    "max_order_notional_pct": 0.15,
+    "max_single_position_pct": 0.25,
+    "max_gross_exposure_pct": 0.95,
+    "max_futures_margin_pct": 0.30,
+    "max_pending_orders": 20,
+}
 
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_risk_limits() -> dict[str, float | int]:
+    """读取纸面交易的预交易风控；异常或旧配置一律回退到安全默认值。"""
+    limits = dict(DEFAULT_RISK_LIMITS)
+    try:
+        stored = json.loads(get_setting(RISK_LIMITS_KEY, "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        stored = {}
+    if not isinstance(stored, dict):
+        return limits
+    for key in ("max_order_notional_pct", "max_single_position_pct", "max_gross_exposure_pct", "max_futures_margin_pct"):
+        value = stored.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(value) and 0 < float(value) <= 1:
+            limits[key] = float(value)
+    value = stored.get("max_pending_orders")
+    if isinstance(value, int) and 1 <= value <= 200:
+        limits["max_pending_orders"] = value
+    return limits
+
+
+def update_risk_limits(updates: dict[str, Any]) -> dict[str, float | int]:
+    """更新本地纸面账户的风险限额。限制只能收紧到合理的 0-100% 区间。"""
+    allowed = set(DEFAULT_RISK_LIMITS)
+    unexpected = set(updates) - allowed
+    if unexpected:
+        raise ValueError(f"不支持的风控字段: {','.join(sorted(unexpected))}")
+    limits = get_risk_limits()
+    for key in ("max_order_notional_pct", "max_single_position_pct", "max_gross_exposure_pct", "max_futures_margin_pct"):
+        if key not in updates:
+            continue
+        try:
+            value = float(updates[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} 必须是数值") from exc
+        if not math.isfinite(value) or not 0 < value <= 1:
+            raise ValueError(f"{key} 必须在 0 与 1 之间")
+        limits[key] = value
+    if "max_pending_orders" in updates:
+        value = updates["max_pending_orders"]
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 200:
+            raise ValueError("max_pending_orders 必须是 1-200 的整数")
+        limits["max_pending_orders"] = value
+    set_setting(RISK_LIMITS_KEY, json.dumps(limits, ensure_ascii=False))
+    audit("paper_risk_limits_updated", limits)
+    return limits
+
+
+def _pre_trade_risk_check(db, market: str, symbol: str, side: str, price: float, quantity: float) -> dict[str, Any]:
+    """以成交后的投影仓位检查预交易风险。减仓/平仓不受敞口限制。"""
+    increasing = side in {"buy", "open_long", "open_short"}
+    limits = get_risk_limits()
+    if not increasing:
+        return {"ok": True, "limits": limits, "action": "risk_reducing"}
+    account = db.execute("SELECT cash FROM paper_account WHERE id=1").fetchone()
+    cash = float(account["cash"] or 0.0) if account else 0.0
+    positions = [dict(row) for row in db.execute("SELECT market,symbol,quantity,avg_cost,last_price FROM paper_positions").fetchall()]
+    equity = cash
+    gross_exposure = 0.0
+    futures_margin = 0.0
+    projected_single = price * quantity
+    for position in positions:
+        mark = float(position["last_price"] or position["avg_cost"] or 0.0)
+        qty = float(position["quantity"] or 0.0)
+        if position["market"] in ("a", "index"):
+            notional = abs(qty) * mark
+            equity += notional
+            gross_exposure += notional
+        else:
+            margin = abs(qty) * mark * FUTURES_MARGIN
+            equity += margin
+            gross_exposure += margin
+            futures_margin += margin
+        if position["market"] == market and position["symbol"] == symbol:
+            delta = quantity if side in {"buy", "open_long"} else -quantity
+            projected_single = abs(qty + delta) * price
+            if market in ("a", "index"):
+                gross_exposure -= abs(qty) * mark
+            else:
+                futures_margin -= abs(qty) * mark * FUTURES_MARGIN
+                gross_exposure -= abs(qty) * mark * FUTURES_MARGIN
+    if market in ("a", "index"):
+        gross_exposure += projected_single
+    else:
+        projected_margin = projected_single * FUTURES_MARGIN
+        futures_margin += projected_margin
+        gross_exposure += projected_margin
+    equity = max(equity, 1.0)
+    order_notional = price * quantity
+    metrics = {
+        "equity": round(equity, 2), "order_notional": round(order_notional, 2),
+        "projected_single_notional": round(projected_single, 2), "projected_gross_exposure": round(gross_exposure, 2),
+        "projected_futures_margin": round(futures_margin, 2), "limits": limits,
+    }
+    checks = [
+        (order_notional / equity <= float(limits["max_order_notional_pct"]), "单笔委托金额超过风控上限"),
+        (projected_single / equity <= float(limits["max_single_position_pct"]), "单标的敞口超过风控上限"),
+        (gross_exposure / equity <= float(limits["max_gross_exposure_pct"]), "总敞口超过风控上限"),
+    ]
+    if market == "futures":
+        checks.append((futures_margin / equity <= float(limits["max_futures_margin_pct"]), "期货保证金占用超过风控上限"))
+    for passed, message in checks:
+        if not passed:
+            return {"ok": False, "error": message, **metrics}
+    return {"ok": True, **metrics}
 
 
 def _ensure_account() -> None:
@@ -130,7 +244,8 @@ def _account_snapshot() -> dict[str, Any]:
             "side_label": "空头" if qty < 0 else "多头",
         })
 
-    total_asset = float(acc["cash"]) + asset_contrib + float(acc["realized_pnl"] or 0.0)
+    # 所有成交损益都回写 cash；realized_pnl 只作报表字段，不能再次计入资产。
+    total_asset = float(acc["cash"]) + asset_contrib
     return {
         "initial_cash": float(acc["initial_cash"]),
         "cash": float(acc["cash"]),
@@ -139,6 +254,7 @@ def _account_snapshot() -> dict[str, Any]:
         "market_value": round(market_value, 2),
         "total_asset": round(total_asset, 2),
         "day_pnl": round(day_pnl, 2),
+        "risk_limits": get_risk_limits(),
         "positions": rows,
     }
 
@@ -230,6 +346,12 @@ def place_order(
         if last is None:
             return {"ok": False, "error": "暂无法获取该标的最新价,请稍后再试"}
 
+        risk_price = float(price) if order_type == "limit" and price is not None else float(last)
+        risk = _pre_trade_risk_check(db, market, symbol, side, risk_price, quantity)
+        if not risk.get("ok"):
+            db.execute("INSERT INTO audit_log(event,payload) VALUES(?,?)", ("paper_trade_blocked", json.dumps({"market": market, "symbol": symbol, "side": side, **risk}, ensure_ascii=False)))
+            return {"ok": False, "error": str(risk["error"]), "risk": risk}
+
         # 限价单判定可成交
         fill_price = last
         if order_type == "limit":
@@ -239,6 +361,9 @@ def place_order(
                     # 未触发: 挂起
                     if existing_order_id is not None:
                         return {"ok": True, "order_id": existing_order_id, "status": "pending", "reason": f"限价 {limit} 未触及现价 {last}"}
+                    pending = int(db.execute("SELECT COUNT(*) FROM paper_orders WHERE status='pending'").fetchone()[0])
+                    if pending >= int(get_risk_limits()["max_pending_orders"]):
+                        return {"ok": False, "error": "挂单数量达到风控上限", "risk": risk}
                     db.execute(
                         "INSERT INTO paper_orders(market,symbol,name,side,order_type,price,quantity,status,filled_qty,created_at,updated_at) "
                         "VALUES(?,?,?,?,?,?,?,'pending',0,?,?)",
@@ -251,6 +376,9 @@ def place_order(
                 if limit > last:
                     if existing_order_id is not None:
                         return {"ok": True, "order_id": existing_order_id, "status": "pending", "reason": f"限价 {limit} 未触及现价 {last}"}
+                    pending = int(db.execute("SELECT COUNT(*) FROM paper_orders WHERE status='pending'").fetchone()[0])
+                    if pending >= int(get_risk_limits()["max_pending_orders"]):
+                        return {"ok": False, "error": "挂单数量达到风控上限", "risk": risk}
                     db.execute(
                         "INSERT INTO paper_orders(market,symbol,name,side,order_type,price,quantity,status,filled_qty,created_at,updated_at) "
                         "VALUES(?,?,?,?,?,?,?,'pending',0,?,?)",
@@ -303,11 +431,11 @@ def place_order(
             elif side == "close_long":
                 _update_position(db, market, symbol, name, -quantity, fill_price)
                 realized = (fill_price - avg_at_close) * quantity
-                delta_cash = avg_at_close * quantity * FUTURES_MARGIN - fee
+                delta_cash = avg_at_close * quantity * FUTURES_MARGIN + realized - fee
             elif side == "close_short":
                 _update_position(db, market, symbol, name, quantity, fill_price)
                 realized = (avg_at_close - fill_price) * quantity
-                delta_cash = avg_at_close * quantity * FUTURES_MARGIN - fee
+                delta_cash = avg_at_close * quantity * FUTURES_MARGIN + realized - fee
         else:
             if side == "buy":
                 _update_position(db, market, symbol, name, quantity, fill_price)
@@ -341,7 +469,7 @@ def place_order(
             (oid, market, symbol, name, side, fill_price, quantity, fee, _now()),
         )
     audit("paper_trade", {"market": market, "symbol": symbol, "side": side, "price": fill_price, "qty": quantity})
-    return {"ok": True, "order_id": oid, "status": "filled", "price": fill_price, "fee": fee, "realized_pnl": round(realized, 2)}
+    return {"ok": True, "order_id": oid, "status": "filled", "price": fill_price, "fee": fee, "realized_pnl": round(realized, 2), "risk": risk}
 
 
 def process_pending_orders(limit: int = 100) -> list[dict[str, Any]]:
@@ -410,6 +538,19 @@ def trade_account() -> dict[str, Any]:
         return {"ok": True, "updated_at": _now(), **{k: v for k, v in _account_snapshot().items() if k != "positions"}, "positions_count": len(_account_snapshot()["positions"])}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+@router.get("/risk-limits")
+def trade_risk_limits() -> dict[str, Any]:
+    return {"ok": True, "limits": get_risk_limits()}
+
+
+@router.put("/risk-limits")
+def trade_update_risk_limits(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    try:
+        return {"ok": True, "limits": update_risk_limits(payload)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @router.post("/order")

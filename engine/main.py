@@ -97,14 +97,14 @@ app.include_router(market_router)
 
 try:
     from .papertrade import router as papertrade_router
-    from .papertrade import _account_snapshot, _list_orders, _list_trades, cancel_order, place_order as place_paper_order, process_pending_orders
+    from .papertrade import _account_snapshot, _list_orders, _list_trades, cancel_order, get_risk_limits as get_paper_risk_limits, place_order as place_paper_order, process_pending_orders, update_risk_limits as update_paper_risk_limits
 except ImportError:
     try:
         from engine.papertrade import router as papertrade_router
-        from engine.papertrade import _account_snapshot, _list_orders, _list_trades, cancel_order, place_order as place_paper_order, process_pending_orders
+        from engine.papertrade import _account_snapshot, _list_orders, _list_trades, cancel_order, get_risk_limits as get_paper_risk_limits, place_order as place_paper_order, process_pending_orders, update_risk_limits as update_paper_risk_limits
     except ImportError:
         from papertrade import router as papertrade_router
-        from papertrade import _account_snapshot, _list_orders, _list_trades, cancel_order, place_order as place_paper_order, process_pending_orders
+        from papertrade import _account_snapshot, _list_orders, _list_trades, cancel_order, get_risk_limits as get_paper_risk_limits, place_order as place_paper_order, process_pending_orders, update_risk_limits as update_paper_risk_limits
 app.include_router(papertrade_router)
 
 try:
@@ -311,6 +311,8 @@ AGENT_TOOLS = [
     {"type":"function","name":"get_market_fflow","description":"查询个股近 N 日资金流序列(每日主力/超大单/大单/中单/小单净流入金额)。用于判断主力资金连续净买/净卖。","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"market":{"type":"string","enum":["a","index"],"default":"a"},"limit":{"type":"integer","minimum":5,"maximum":120,"default":20}},"required":["symbol"],"additionalProperties":False}},
     {"type":"function","name":"get_hsgt_flow","description":"查询沪深港通北向/南向资金日度汇总(当日成交净买额、资金流入、额度余额)。注意:2024年8月起交易所停止披露实时北向成交,故仅有日度数据。","parameters":{"type":"object","properties":{},"additionalProperties":False}},
     {"type":"function","name":"get_paper_account","description":"查询模拟交易账户:总资产、可用现金、已实现盈亏、未实现浮动盈亏、总市值、当日参考盈亏。用于模拟盘资产概览。","parameters":{"type":"object","properties":{},"additionalProperties":False}},
+    {"type":"function","name":"get_paper_risk_limits","description":"查询模拟盘预交易风控限额：单笔金额、单标的敞口、总敞口、期货保证金占用和挂单数。","parameters":{"type":"object","properties":{},"additionalProperties":False}},
+    {"type":"function","name":"update_paper_risk_limits","description":"更新本地模拟盘预交易风控限额。仅 full 模式可执行；百分比字段取 0-1，max_pending_orders 取 1-200。","parameters":{"type":"object","properties":{"max_order_notional_pct":{"type":"number","exclusiveMinimum":0,"maximum":1},"max_single_position_pct":{"type":"number","exclusiveMinimum":0,"maximum":1},"max_gross_exposure_pct":{"type":"number","exclusiveMinimum":0,"maximum":1},"max_futures_margin_pct":{"type":"number","exclusiveMinimum":0,"maximum":1},"max_pending_orders":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":False}},
     {"type":"function","name":"list_paper_positions","description":"查询模拟交易当前持仓(股票+期货),含数量、成本价、最新价、市值、浮动盈亏、当日盈亏。","parameters":{"type":"object","properties":{},"additionalProperties":False}},
     {"type":"function","name":"place_paper_order","description":"模拟交易下单。market 支持 a(股票)/futures(期货);side:股票 buy/sell,期货 open_long(开多)/open_short(开空)/close_long(平多)/close_short(平空);order_type 支持 market(市价立即成交)/limit(限价,未触发则挂起可撤);股票需 quantity 手数(100整数倍),期货手数整数。限价单未成交会返回 status=pending 与 order_id,可用 cancel_paper_order 撤单。","parameters":{"type":"object","properties":{"market":{"type":"string","enum":["a","futures"],"default":"a"},"symbol":{"type":"string"},"side":{"type":"string","enum":["buy","sell","open_long","open_short","close_long","close_short"]},"order_type":{"type":"string","enum":["market","limit"],"default":"market"},"price":{"type":"number"},"quantity":{"type":"number"}},"required":["symbol","side","quantity"],"additionalProperties":False}},
     {"type":"function","name":"cancel_paper_order","description":"撤消模拟交易中挂起的限价委托。需传入下单返回的 order_id。","parameters":{"type":"object","properties":{"order_id":{"type":"integer"}},"required":["order_id"],"additionalProperties":False}},
@@ -758,6 +760,7 @@ _MUTATING_TOOL_LABELS = {
     "apply_portfolio_proposal": "写入组合提案",
     "place_paper_order": "模拟下单",
     "cancel_paper_order": "撤单",
+    "update_paper_risk_limits": "更新模拟盘风控限额",
     "create_scheduled_task": "创建定时任务",
     "delete_scheduled_task": "删除定时任务",
     "manage_price_alerts": "预警管理",
@@ -1052,6 +1055,14 @@ def _tool_result(name: str, arguments: dict[str, Any], access_mode: str = "ask")
             return "读取模拟账户", f"总资产 {result.get('total_asset')} · 浮动 {result.get('unrealized_pnl')} · 当日 {result.get('day_pnl')}", json.dumps(result, ensure_ascii=False)
         except Exception as exc:
             return "读取模拟账户", "账户读取失败", json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False)
+    if name == "get_paper_risk_limits":
+        return "读取模拟盘风控", "已读取预交易风控限额", json.dumps({"ok": True, "limits": get_paper_risk_limits()}, ensure_ascii=False)
+    if name == "update_paper_risk_limits":
+        try:
+            limits = update_paper_risk_limits(arguments)
+            return "更新模拟盘风控", "已更新本地预交易风控限额", json.dumps({"ok": True, "limits": limits}, ensure_ascii=False)
+        except ValueError as exc:
+            return "更新模拟盘风控", "更新失败", json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
     if name == "list_paper_positions":
         try:
             result = _account_snapshot()

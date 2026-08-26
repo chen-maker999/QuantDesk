@@ -155,6 +155,7 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
         <Stat label="当日参考盈亏" value={`${(acc?.day_pnl ?? 0) >= 0 ? "+" : ""}${fmtAmount(acc?.day_pnl)}`} tone={pnl(acc?.day_pnl)} />
         <Stat label="已实现盈亏" value={`${(acc?.realized_pnl ?? 0) >= 0 ? "+" : ""}${fmtAmount(acc?.realized_pnl)}`} tone={pnl(acc?.realized_pnl)} />
       </div>
+      {acc?.risk_limits && <div className="card paper-risk-policy"><b>预交易风控（模拟盘）</b><span>单笔 ≤ {(acc.risk_limits.max_order_notional_pct * 100).toFixed(0)}% · 单标的 ≤ {(acc.risk_limits.max_single_position_pct * 100).toFixed(0)}% · 总敞口 ≤ {(acc.risk_limits.max_gross_exposure_pct * 100).toFixed(0)}% · 期货保证金 ≤ {(acc.risk_limits.max_futures_margin_pct * 100).toFixed(0)}% · 挂单 ≤ {acc.risk_limits.max_pending_orders}</span></div>}
 
       {/* 交易表单 + 列表 */}
       <div className="paper-layout">
@@ -217,7 +218,7 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
             {busy ? <RefreshCw className="spin" size={14} /> : <CheckCircle2 size={14} />}
             {SIDE_LABELS[side] || side} {sel?.symbol || query || (market === "futures" ? "指定代码" : "")}
           </button>
-          <p className="paper-hint">市价单按实时价撮合；限价买单需 ≥ 现价、卖单需 ≤ 现价才成交，未触发则挂单可撤。股票买入扣全额资金，期货开仓只扣保证金（12%）。</p>
+          <p className="paper-hint">市价单按实时价撮合；限价买单需 ≥ 现价、卖单需 ≤ 现价才成交，未触发则挂单可撤。股票买入扣全额资金，期货开仓只扣保证金（12%）；所有开仓均先经过预交易风控。</p>
         </div>
 
         <div className="paper-lists">
