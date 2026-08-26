@@ -23,6 +23,12 @@ def run_portfolio_backtest(
     slippage_bps: float = 5.0,
 ) -> dict:
     """weights 为目标权重(自动归一化); rebalance_days<=0 表示期初一次性配置不再平衡。"""
+    if not weights:
+        raise BacktestDataError("目标权重不能为空")
+    if any(not np.isfinite(float(weight)) or float(weight) <= 0 for weight in weights.values()):
+        raise BacktestDataError("当前组合回测仅支持有限的正权重（long-only）")
+    if not np.isfinite(cost_bps) or not np.isfinite(slippage_bps) or cost_bps < 0 or slippage_bps < 0:
+        raise BacktestDataError("佣金与滑点必须是非负有限数值")
     usable = {s: c.dropna() for s, c in closes.items() if s in weights and len(c.dropna()) >= 30}
     if len(usable) < 1:
         raise BacktestDataError("没有可用标的（每个至少 30 个交易日收盘价）")
@@ -38,6 +44,8 @@ def run_portfolio_backtest(
     panel = pd.DataFrame(usable).sort_index().dropna(how="any")
     if len(panel) < 40:
         raise BacktestDataError(f"共同交易日后样本不足（{len(panel)} 行，至少 40 行）。可减少标的或补齐历史。")
+    if not np.isfinite(panel.to_numpy(dtype=float)).all() or (panel.to_numpy(dtype=float) <= 0).any():
+        raise BacktestDataError("价格必须为大于 0 的有限数值")
 
     rets = panel.pct_change().dropna()
     symbols = list(panel.columns)
@@ -90,13 +98,15 @@ def run_portfolio_backtest(
         nav_values[-1] = equity
 
     nav = np.array(nav_values)
-    port_returns = nav[1:] / nav[:-1] - 1 if len(nav) > 1 else np.array([0.0])
+    # nav 与 rets 同日对齐；以前一交易日前净值 1.0 衔接，首日收益不能丢失。
+    port_returns = nav / np.concatenate(([1.0], nav[:-1])) - 1 if len(nav) else np.array([0.0])
     ann_ret = nav[-1] ** (252 / max(len(nav), 1)) - 1
     ann_vol = float(port_returns.std(ddof=1) * np.sqrt(252)) if len(port_returns) > 2 else 0.0
     nav_with_start = np.concatenate(([1.0], nav))
     running_max = np.maximum.accumulate(nav_with_start)
     drawdown = nav_with_start / running_max - 1
-    bench_nav = (panel / panel.iloc[0]).mean(axis=1).to_numpy()
+    # 策略净值从 panel 的第一个收益日开始，基准也必须从同一日期开始，避免图表和指标错位。
+    bench_nav = (panel.iloc[1:] / panel.iloc[0]).mean(axis=1).to_numpy()
     bench_ret_series = bench_nav[1:] / bench_nav[:-1] - 1 if len(bench_nav) > 1 else np.array([0.0])
     bench_ann = bench_nav[-1] ** (252 / max(len(bench_nav), 1)) - 1
 
@@ -124,5 +134,11 @@ def run_portfolio_backtest(
             "total_cost_drag": round(costs_total, 4),
         },
         "benchmark_annual_return": round(float(bench_ann), 4),
+        "assumptions": {
+            "execution": "initial allocation before first close-to-close return; scheduled rebalances after each completed return",
+            "cost_model": "initial buy, turnover on rebalances, and terminal liquidation; benchmark is equal-weight buy-and-hold before costs",
+            "long_only": True,
+            "point_in_time": True,
+        },
         "attribution": {s: round(v / max(total_contrib, 1e-9) * (nav[-1] - 1), 4) if total_contrib != 0 else 0.0 for s, v in contributions.items()},
     }

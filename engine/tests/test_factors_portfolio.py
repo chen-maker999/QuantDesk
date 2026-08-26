@@ -75,7 +75,9 @@ class PortfolioBacktestTest(unittest.TestCase):
         for key in ("total_return", "annual_return", "sharpe", "max_drawdown", "win_rate", "avg_turnover_per_rebal"):
             self.assertIn(key, m)
         self.assertEqual(len(result["nav"]), len(result["nav_dates"]))
+        self.assertEqual(len(result["nav"]), len(result["benchmark_nav"]))
         self.assertAlmostEqual(sum(result["weights"].values()), 1.0, places=3)
+        self.assertTrue(result["assumptions"]["point_in_time"])
 
     def test_costs_reduce_returns(self):
         cheap = run_portfolio_backtest(self._closes(), {"AAA": 1.0}, cost_bps=1, slippage_bps=0)
@@ -90,6 +92,10 @@ class PortfolioBacktestTest(unittest.TestCase):
     def test_missing_target_weight_fails_instead_of_silently_holding_cash(self):
         with self.assertRaises(BacktestDataError):
             run_portfolio_backtest({"AAA": make_close()}, {"AAA": .6, "MISSING": .4})
+
+    def test_rejects_short_or_invalid_weights(self):
+        with self.assertRaises(BacktestDataError):
+            run_portfolio_backtest(self._closes(), {"AAA": 1.1, "BBB": -.1})
 
 
 if __name__ == "__main__":
