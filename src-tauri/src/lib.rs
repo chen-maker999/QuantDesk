@@ -1,5 +1,6 @@
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use tauri::Emitter;
 
 struct EngineProcess(Mutex<Option<Child>>);
 struct EngineToken(Mutex<Option<String>>);
@@ -159,22 +160,28 @@ fn start_engine(
     let adjacent_script = executable_dir
         .as_ref()
         .map(|dir| dir.join("engine").join("main.py"));
+    let script_found = resource_script.exists()
+        || adjacent_script.as_ref().map(|p| p.exists()).unwrap_or(false);
     let packaged_script = if resource_script.exists() {
         resource_script
     } else {
         adjacent_script.unwrap_or(resource_dir.join("engine").join("main.py"))
     };
-    let (script, cwd) = if packaged_script.exists() {
+    // 开发模式（cwd 为 src-tauri 且 ../engine/main.py 存在）永远优先跑项目根的最新
+    // Python 源码；resource_dir 下的 engine/ 与 engine-bin/ 都是构建期拷贝，可能过期，
+    // 优先用它们会把开发中的引擎改动（新提供商/新端点）全部丢掉。
+    let dev_script = std::path::Path::new("../engine/main.py");
+    let (script, cwd) = if dev_script.exists() {
+        (
+            std::path::PathBuf::from("engine/main.py"),
+            Some(std::path::PathBuf::from("..")),
+        )
+    } else if packaged_script.exists() {
         (packaged_script, None)
     } else if std::path::Path::new("engine/main.py").exists() {
         (
             std::path::PathBuf::from("engine/main.py"),
             Some(std::path::PathBuf::from(".")),
-        )
-    } else if std::path::Path::new("../engine/main.py").exists() {
-        (
-            std::path::PathBuf::from("engine/main.py"),
-            Some(std::path::PathBuf::from("..")),
         )
     } else {
         (std::path::PathBuf::from("engine/main.py"), None)
@@ -191,7 +198,12 @@ fn start_engine(
     } else {
         std::path::PathBuf::from("python")
     };
-    let mut command = if bundled_engine.exists() {
+    // 仅在找不到 Python 源码（真正的打包安装形态）时才用捆绑引擎二进制：
+    // target/debug 里可能残留旧构建拷贝的 engine-bin/quant-engine.exe，
+    // 优先用它会把开发中的引擎改动（新提供商/新端点）全部丢掉。
+    let dev_script_present = std::path::Path::new("engine/main.py").exists()
+        || std::path::Path::new("../engine/main.py").exists();
+    let mut command = if bundled_engine.exists() && !script_found && !dev_script_present {
         Command::new(bundled_engine)
     } else {
         let mut fallback = Command::new(python);
@@ -203,6 +215,10 @@ fn start_engine(
     };
     let engine_token = uuid::Uuid::new_v4().to_string();
     command.env("QUANTDESK_ENGINE_TOKEN", &engine_token);
+    // 桌面端拉起的引擎沿用 HTTP+令牌鉴权；用户机器上常设 QUANTDESK_ENGINE_HOST=0.0.0.0
+    // （手机局域网访问），引擎会因"非回环监听必须 TLS"拒绝启动，这里显式放行。
+    // 需要加密传输时用户可自行设置 QUANTDESK_ENGINE_TLS=1，守卫同样放行。
+    command.env("QUANTDESK_ALLOW_INSECURE_LAN", "1");
     if let Ok(entry) = keyring::Entry::new("QuantDesk", "OpenAI") {
         if let Ok(secret) = entry.get_password() {
             command.env("OPENAI_API_KEY", secret);
@@ -228,15 +244,46 @@ fn start_engine(
             command.env("DASHSCOPE_API_KEY", secret);
         }
     }
+    if let Ok(entry) = keyring::Entry::new("QuantDesk", "OpenRouter") {
+        if let Ok(secret) = entry.get_password() {
+            command.env("OPENROUTER_API_KEY", secret);
+        }
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
+    // 引擎 stdout/stderr 落盘到 logs/spawn.log（追加），不再静默丢弃——
+    // 引擎启动失败（端口占用、Python 异常等）事后可查。
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let spawn_log_dir = exe_dir.join("logs");
+    let _ = std::fs::create_dir_all(&spawn_log_dir);
+    let spawn_log_path = spawn_log_dir.join("spawn.log");
+    let open_append = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&spawn_log_path)
+            .ok()
+    };
+    let stdout_log = open_append();
+    let stderr_log = open_append();
+    if let Some(mut file) = open_append() {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{ts}] spawning engine");
+    }
     let child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(stdout_log.map(Stdio::from).unwrap_or(Stdio::null()))
+        .stderr(stderr_log.map(Stdio::from).unwrap_or(Stdio::null()))
         .spawn()
         .map_err(|e| format!("Unable to start Python engine: {e}"))?;
     *guard = Some(child);
@@ -244,6 +291,62 @@ fn start_engine(
         .0
         .lock()
         .map_err(|_| "Engine token state is unavailable")? = Some(engine_token);
+    // 释放 guard 前先克隆必要信息用于就绪等待；等待期间允许其它线程查看状态。
+    drop(guard);
+    // 就绪握手：轮询 TCP 就绪（最多 60s），并提前发现引擎异常退出。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if engine_alive() {
+            break;
+        }
+        {
+            let mut guard = state.0.lock().map_err(|_| "Engine state is unavailable")?;
+            match guard.as_mut() {
+                Some(child) => {
+                    if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                        return Err(format!(
+                            "引擎进程启动后立即退出，请查看 {}",
+                            spawn_log_path.display()
+                        ));
+                    }
+                }
+                None => return Err("引擎进程状态丢失".into()),
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("引擎 60 秒内未就绪（端口未监听），请查看 spawn.log".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // 引擎意外退出监控：通知前端展示提示，而不是让用户面对无法解释的连接错误。
+    let app_handle = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let state = app_handle.state::<EngineProcess>();
+        let exited = {
+            let mut guard = match state.0.lock() {
+                Ok(g) => g,
+                Err(_) => break,
+            };
+            match guard.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => {
+                        *guard = None;
+                        Some(status)
+                    }
+                    _ => None,
+                },
+                None => break, // 应用退出或已重启监控
+            }
+        };
+        if let Some(status) = exited {
+            let _ = app_handle.emit(
+                "engine-exited",
+                serde_json::json!({ "code": status.code() }),
+            );
+            break;
+        }
+    });
     Ok("started".into())
 }
 
@@ -599,6 +702,15 @@ async fn browser_state(app: tauri::AppHandle, label: String) -> Result<serde_jso
 
 pub fn run() {
     tauri::Builder::default()
+        // 单实例互斥：二次启动只激活已有窗口并退出，杜绝两个实例并发拉起引擎抢端口。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(EngineProcess(Mutex::new(None)))
         .manage(EngineToken(Mutex::new(None)))
         .manage(BrowserHwnds(Mutex::new(HashMap::new())))

@@ -8,15 +8,16 @@ os.environ["QUANTDESK_DATA_DIR"] = tempfile.mkdtemp(prefix="quantdesk-test-")
 import numpy as np
 import pandas as pd
 
-from engine.factors import FactorCodeError, build_panels, compile_factor, evaluate_factor
-from engine.portfolio_backtest import BacktestDataError, run_portfolio_backtest
+from engine.factors import FactorCodeError, build_panels, compile_factor, evaluate_factor, walk_forward_ic
+from engine.portfolio_backtest import BacktestDataError, run_portfolio_backtest, walk_forward_portfolio
 
 
 def make_close(days=260, base=10.0, drift=0.0005, seed=7):
     rng = np.random.default_rng(seed)
     rets = rng.normal(drift, 0.01, days)
     close = base * np.cumprod(1 + rets)
-    index = pd.date_range("2025-01-01", periods=days, freq="B").strftime("%Y-%m-%d")
+    # 2023 年无内置节假日行, freq="B" 已是纯工作日, 回测日历过滤不改变样本
+    index = pd.date_range("2023-01-02", periods=days, freq="B").strftime("%Y-%m-%d")
     return pd.Series(close, index=index)
 
 
@@ -96,6 +97,91 @@ class PortfolioBacktestTest(unittest.TestCase):
     def test_rejects_short_or_invalid_weights(self):
         with self.assertRaises(BacktestDataError):
             run_portfolio_backtest(self._closes(), {"AAA": 1.1, "BBB": -.1})
+
+    def test_real_benchmark_aligns_and_provides_comparison(self):
+        closes = self._closes()
+        panel_index = pd.DataFrame(closes).sort_index().dropna(how="any").index
+        bench = make_close(days=len(panel_index), base=3000.0, drift=0.0002, seed=42)
+        bench.index = panel_index
+        result = run_portfolio_backtest(closes, {"AAA": 0.5, "BBB": 0.5}, rebalance_days=20, benchmark_closes=bench)
+        self.assertEqual(result["benchmark"], "已导入基准")
+        comparison = result["comparison"]
+        for key in ("excess_annual_return", "alpha_annual", "beta", "information_ratio", "tracking_error"):
+            self.assertIn(key, comparison)
+        # 相对净值与净值曲线同长；首点 = 首日组合净值 / 首日基准净值
+        self.assertEqual(len(result["relative_nav"]), len(result["nav"]))
+        self.assertAlmostEqual(result["relative_nav"][0], result["nav"][0] / result["benchmark_nav"][0], places=3)
+        # 超额年化 = 组合年化 - 基准年化
+        self.assertAlmostEqual(
+            comparison["excess_annual_return"],
+            result["metrics"]["annual_return"] - result["benchmark_annual_return"], places=2,
+        )
+        # 月度收益表
+        self.assertTrue(result["monthly_returns"])
+        for row in result["monthly_returns"]:
+            self.assertRegex(row["month"], r"^\d{4}-\d{2}$")
+            self.assertTrue(np.isfinite(row["return"]))
+
+    def test_misaligned_benchmark_falls_back_to_equal_weight(self):
+        closes = self._closes()
+        wrong_index = make_close(days=200, base=1000.0, seed=9)  # 日期与面板不一致
+        result = run_portfolio_backtest(closes, {"AAA": 0.5, "BBB": 0.5}, benchmark_closes=wrong_index)
+        self.assertEqual(result["benchmark"], "等权基准")
+        result_none = run_portfolio_backtest(closes, {"AAA": 0.5, "BBB": 0.5}, benchmark_closes=None)
+        self.assertEqual(result_none["benchmark"], "等权基准")
+
+    def test_limit_up_defers_buy_to_next_tradable_day(self):
+        closes = self._closes()
+        aaa = closes["AAA"].copy()
+        # 前 19 个收益日阴跌(权重降到目标之下, 再平衡需买入), 第 20 个交易日 +12% 一字板
+        aaa.iloc[1:20] = aaa.iloc[0] * np.cumprod(np.full(19, 0.98))
+        aaa.iloc[20] = aaa.iloc[19] * 1.12
+        closes["AAA"] = aaa
+        weights = {"AAA": 0.5, "BBB": 0.25, "CCC": 0.15, "DDD": 0.1}
+        result = run_portfolio_backtest(closes, weights, rebalance_days=20, price_limit_pct=0.098)
+        self.assertEqual(result["metrics"]["deferred_trades"], 1)
+        # 关闭涨跌停约束后无顺延, 且净值路径不同(顺延改变了成交价格日)
+        off = run_portfolio_backtest(closes, weights, rebalance_days=20, price_limit_pct=0)
+        self.assertEqual(off["metrics"]["deferred_trades"], 0)
+        self.assertNotEqual(result["nav"], off["nav"])
+        # 无一字板的正常数据不产生顺延
+        normal = run_portfolio_backtest(self._closes(), weights, rebalance_days=20)
+        self.assertEqual(normal["metrics"]["deferred_trades"], 0)
+
+    def test_limit_down_defers_sell_to_next_tradable_day(self):
+        closes = self._closes()
+        aaa = closes["AAA"].copy()
+        # 前 19 个收益日大涨(权重远超目标, 再平衡需卖出), 第 20 个交易日 -12% 一字跌停
+        aaa.iloc[1:20] = aaa.iloc[0] * np.cumprod(np.full(19, 1.03))
+        aaa.iloc[20] = aaa.iloc[19] * 0.88
+        closes["AAA"] = aaa
+        result = run_portfolio_backtest(closes, {"AAA": 0.5, "BBB": 0.25, "CCC": 0.15, "DDD": 0.1}, rebalance_days=20, price_limit_pct=0.098)
+        self.assertEqual(result["metrics"]["deferred_trades"], 1)
+        self.assertTrue(np.isfinite(result["nav"]).all())
+
+    def test_suspension_days_defer_whole_panel(self):
+        closes = self._closes()
+        aaa = closes["AAA"].copy()
+        aaa.iloc[100:103] = np.nan  # 停牌 3 日: 面板整行剔除, 组合顺延
+        closes["AAA"] = aaa
+        result = run_portfolio_backtest(closes, {"AAA": 0.5, "BBB": 0.5}, rebalance_days=20)
+        self.assertEqual(result["days"], 256)  # 260 收盘 - 3 停牌 - 1
+        self.assertTrue(np.isfinite(result["nav"]).all())
+        self.assertIn("suspension", result["assumptions"])
+
+    def test_walk_forward_ic_reports_oos_windows(self):
+        dates = pd.bdate_range("2023-01-02", periods=120).strftime("%Y-%m-%d")
+        ics = [(day, 0.05 if i % 3 else -0.02) for i, day in enumerate(dates)]
+        result = walk_forward_ic(ics, train_days=40, test_days=20)
+        self.assertGreaterEqual(result["n_windows"], 2)
+        self.assertIn("oos_ic", result["windows"][0])
+        self.assertIn("degradation", result["overfit_check"])
+
+    def test_walk_forward_portfolio_static_weights(self):
+        closes = self._closes()
+        result = walk_forward_portfolio(closes, {"AAA": 0.5, "BBB": 0.5}, train_days=80, test_days=40)
+        self.assertGreaterEqual(result["n_windows"], 2)
+        self.assertIn("oos_sharpe", result["windows"][0])
 
 
 if __name__ == "__main__":

@@ -250,7 +250,8 @@ def evaluate_factor(factor_fn: Callable[[pd.DataFrame], pd.Series], inputs: dict
         raise FactorCodeError("有效 IC 样本不足（<10 期），请延长历史或放宽条件")
 
     ics = np.array([v for _, v in ic_list]); ic_mean = float(ics.mean()); ic_std = float(ics.std(ddof=1))
-    result: dict[str, Any] = {"available": True, "symbols": sorted(factor_values), "periods": len(ics), "first_date": ic_list[0][0], "last_date": ic_list[-1][0], "ic_mean": ic_mean, "ic_ir": float(ic_mean / ic_std) if ic_std > 0 else 0.0, "ic_positive_ratio": float((ics > 0).mean()), "t_stat": float(ic_mean / (ic_std / np.sqrt(len(ics)))) if ic_std > 0 else 0.0, "ic_series_tail": [{"date": d, "ic": round(v, 4)} for d, v in ic_list[-40:]], "data_coverage": {"required_columns": sorted(required_columns), "symbols_with_complete_data": len(factor_values), "excluded_symbols": skipped}}
+    ic_series = [{"date": d, "ic": round(v, 4)} for d, v in ic_list[-500:]]
+    result: dict[str, Any] = {"available": True, "symbols": sorted(factor_values), "periods": len(ics), "first_date": ic_list[0][0], "last_date": ic_list[-1][0], "ic_mean": ic_mean, "ic_ir": float(ic_mean / ic_std) if ic_std > 0 else 0.0, "ic_positive_ratio": float((ics > 0).mean()), "t_stat": float(ic_mean / (ic_std / np.sqrt(len(ics)))) if ic_std > 0 else 0.0, "ic_series": ic_series, "ic_series_tail": ic_series[-40:], "data_coverage": {"required_columns": sorted(required_columns), "symbols_with_complete_data": len(factor_values), "excluded_symbols": skipped}}
     base = [curve for curve in layer_curves if curve]
     if base:
         length = min(len(curve) for curve in base); layers = []
@@ -282,3 +283,72 @@ def evaluate_ic_only(factor_values: dict[str, pd.Series], closes: dict[str, pd.S
         if np.std(factors) > 0 and np.std(returns) > 0:
             ics.append(np.corrcoef(np.argsort(np.argsort(factors)), np.argsort(np.argsort(returns)))[0, 1])
     return float(np.nanmean(ics)) if len(ics) >= 5 else float("nan")
+
+
+def _ic_ir(values: np.ndarray) -> float:
+    if len(values) < 2:
+        return 0.0
+    std = float(values.std(ddof=1))
+    return float(values.mean() / std) if std > 0 else 0.0
+
+
+def walk_forward_ic(
+    ic_list: list[tuple[str, float]] | list[dict[str, Any]],
+    train_days: int = 60,
+    test_days: int = 20,
+) -> dict[str, Any]:
+    """对因子 IC 序列做滚动样本外：训练窗只作对照，测试窗不参与选参（IC 无参数）。"""
+    pairs: list[tuple[str, float]] = []
+    for item in ic_list:
+        if isinstance(item, dict):
+            date, value = str(item.get("date") or ""), item.get("ic")
+        else:
+            date, value = str(item[0]), item[1]
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if date and np.isfinite(number):
+            pairs.append((date, number))
+    n = len(pairs)
+    if train_days < 20 or test_days < 5:
+        raise FactorCodeError("train_days 至少 20，test_days 至少 5")
+    if n < train_days + test_days:
+        raise FactorCodeError(f"IC 序列过短（{n}），至少需要 train_days+test_days={train_days + test_days}")
+    ics = np.array([v for _, v in pairs], dtype=float)
+    windows: list[dict[str, Any]] = []
+    oos_parts: list[np.ndarray] = []
+    idx = 0
+    while idx + train_days + test_days <= n:
+        is_slice = ics[idx:idx + train_days]
+        oos = ics[idx + train_days:idx + train_days + test_days]
+        oos_parts.append(oos)
+        windows.append({
+            "train": {"start": pairs[idx][0], "end": pairs[idx + train_days - 1][0]},
+            "test": {"start": pairs[idx + train_days][0], "end": pairs[idx + train_days + len(oos) - 1][0]},
+            "is_ic": round(float(is_slice.mean()), 4),
+            "oos_ic": round(float(oos.mean()), 4),
+            "is_ir": round(_ic_ir(is_slice), 3),
+            "oos_ir": round(_ic_ir(oos), 3),
+        })
+        idx += test_days
+    combined = np.concatenate(oos_parts)
+    mean_is = float(np.mean([w["is_ic"] for w in windows]))
+    mean_oos = float(np.mean([w["oos_ic"] for w in windows]))
+    return {
+        "available": True,
+        "n_windows": len(windows),
+        "oos_days": int(len(combined)),
+        "windows": windows,
+        "combined": {"ic_mean": round(float(combined.mean()), 4), "ic_ir": round(_ic_ir(combined), 3)},
+        "overfit_check": {
+            "mean_is_ic": round(mean_is, 4),
+            "mean_oos_ic": round(mean_oos, 4),
+            "degradation": round(mean_oos / mean_is, 3) if abs(mean_is) > 1e-9 else 0.0,
+        },
+        "assumptions": {
+            "family": "factor RankIC time-series walk-forward",
+            "selection": "no parameter search; train window is in-sample reference only",
+            "point_in_time": True,
+        },
+    }

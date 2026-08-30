@@ -18,13 +18,13 @@ TRADING_DAYS = 252
 
 def build_features(prices: pd.DataFrame) -> pd.DataFrame:
     """Build point-in-time price features without backward-looking leakage."""
-    close = prices.astype(float).replace(0, np.nan).ffill()
-    returns = close.pct_change()
+    close = prices.astype(float).replace(0, np.nan)
+    returns = close.pct_change(fill_method=None)
     features: dict[str, pd.DataFrame] = {
         "ret_1": returns,
-        "mom_5": close.pct_change(5),
-        "mom_20": close.pct_change(20),
-        "mom_60": close.pct_change(60),
+        "mom_5": close.pct_change(5, fill_method=None),
+        "mom_20": close.pct_change(20, fill_method=None),
+        "mom_60": close.pct_change(60, fill_method=None),
         "vol_10": returns.rolling(10).std() * np.sqrt(TRADING_DAYS),
         "vol_20": returns.rolling(20).std() * np.sqrt(TRADING_DAYS),
         "downside_20": returns.clip(upper=0).rolling(20).std() * np.sqrt(TRADING_DAYS),
@@ -180,6 +180,125 @@ def backtest_signal(returns: list[float], signals: list[float], cost_bps: float 
     }
 
 
+def _momentum_positions(returns: np.ndarray, lookback: int) -> np.ndarray:
+    """动量持仓: position_t = sign(截至 t-1 的过去 lookback 日累计收益), 信号滞后一期执行。
+
+    前 lookback 期无完整历史时仓位为 0; 全程只用截止前一日的数据(point-in-time)。"""
+    log_w = np.cumsum(np.log1p(returns))
+    trailing = log_w - np.concatenate((np.zeros(lookback), log_w[:-lookback]))
+    sig = np.where(np.arange(len(returns)) >= lookback - 1, np.sign(np.expm1(trailing)), 0.0)
+    return np.concatenate(([0.0], sig[:-1]))
+
+
+def _sharpe_of(strategy: np.ndarray) -> float:
+    return float(strategy.mean() / strategy.std(ddof=1) * np.sqrt(TRADING_DAYS)) if len(strategy) > 2 and strategy.std(ddof=1) > 0 else 0.0
+
+
+def _annualized_of(strategy: np.ndarray) -> float:
+    wealth = float(np.prod(1 + strategy))
+    return wealth ** (TRADING_DAYS / max(len(strategy), 1)) - 1
+
+
+def _max_drawdown_of(strategy: np.ndarray) -> float:
+    wealth = np.concatenate(([1.0], np.cumprod(1 + strategy)))
+    return float((wealth / np.maximum.accumulate(wealth) - 1).min())
+
+
+def _wf_range(dates: list[str] | None, start: int, end: int) -> dict[str, str]:
+    return {"start": dates[start] if dates else str(start), "end": dates[end - 1] if dates else str(end - 1)}
+
+
+def walk_forward(
+    returns: list[float],
+    param_grid: dict[str, list[int]],
+    train_days: int = 252,
+    test_days: int = 63,
+    cost_bps: float = 12.0,
+    dates: list[str] | None = None,
+) -> dict[str, Any]:
+    """滚动 Walk-Forward 检验(防过拟合初步工具)。
+
+    策略族 = 动量持仓(position = sign(过去 lookback 日累计收益), 滞后一期, 计成本)。
+    param_grid["lookback"] 给出候选窗口。每个滚动窗:
+    - 训练段(train_days)逐参数算样本内夏普并选最优参数;
+    - 紧随的测试段(test_days)用该参数做样本外(OOS)评估, 不参与选参。
+    输出各窗 OOS 指标、拼接后的合并 OOS 净值与 IS→OOS 衰减; OOS 显著差于 IS 即过拟合信号。
+    """
+    r = np.asarray(returns, dtype=float)
+    n = len(r)
+    lookbacks = sorted({int(v) for v in (param_grid or {}).get("lookback", [])})
+    if not lookbacks or lookbacks[0] < 1:
+        raise ValueError('param_grid 需要正整数 lookback 候选, 如 {"lookback": [5, 10, 20, 60]}')
+    if not np.isfinite(r).all() or (r <= -1).any() or n < train_days + test_days:
+        raise ValueError(f"收益必须有限且大于 -100%, 且至少需要 train_days+test_days={train_days + test_days} 个观测, 当前 {n} 个")
+    if train_days < 60 or test_days < 10:
+        raise ValueError("train_days 至少 60, test_days 至少 10")
+    if max(lookbacks) > train_days:
+        raise ValueError("lookback 候选不能超过 train_days")
+    if dates is not None and len(dates) != n:
+        dates = None
+
+    # 每个候选参数全局计算策略收益(信号只依赖截止前一日的数据, 按窗切片不产生未来泄漏)。
+    strategies: dict[int, np.ndarray] = {}
+    for lb in lookbacks:
+        positions = _momentum_positions(r, lb)
+        turnover = np.abs(np.diff(positions, prepend=0.0))
+        strategies[lb] = positions * r - turnover * cost_bps / 10000.0
+
+    windows: list[dict[str, Any]] = []
+    oos_parts: list[np.ndarray] = []
+    idx = 0
+    while idx + train_days + test_days <= n:
+        train_slice = slice(idx, idx + train_days)
+        test_slice = slice(idx + train_days, min(idx + train_days + test_days, n))
+        is_sharpes = {lb: _sharpe_of(strategies[lb][train_slice]) for lb in lookbacks}
+        # 并列时取更短 lookback(参数更少者, 抑制过拟合)。
+        best = max(lookbacks, key=lambda lb: (is_sharpes[lb], -lb))
+        oos = strategies[best][test_slice]
+        oos_parts.append(oos)
+        windows.append({
+            "train": _wf_range(dates, idx, idx + train_days),
+            "test": _wf_range(dates, idx + train_days, test_slice.stop),
+            "params": {"lookback": best},
+            "is_sharpe": round(is_sharpes[best], 3),
+            "oos_sharpe": round(_sharpe_of(oos), 3),
+            "oos_annual_return": round(_annualized_of(oos), 4),
+            "oos_max_drawdown": round(_max_drawdown_of(oos), 4),
+        })
+        idx += test_days
+
+    combined = np.concatenate(oos_parts)
+    wealth = np.cumprod(1 + combined)
+    mean_is = float(np.mean([w["is_sharpe"] for w in windows]))
+    mean_oos = float(np.mean([w["oos_sharpe"] for w in windows]))
+    step = max(len(wealth) // 400, 1)
+    return {
+        "n_windows": len(windows),
+        "oos_days": int(len(combined)),
+        "windows": windows,
+        "combined": {
+            "annual_return": round(_annualized_of(combined), 4),
+            "annual_volatility": round(float(combined.std(ddof=1) * np.sqrt(TRADING_DAYS)), 4) if len(combined) > 2 else 0.0,
+            "sharpe": round(_sharpe_of(combined), 3),
+            "max_drawdown": round(_max_drawdown_of(combined), 4),
+            "win_rate": round(float((combined > 0).mean()), 4),
+            "equity_curve": [round(float(v), 6) for v in wealth[::step]],
+        },
+        "overfit_check": {
+            "mean_is_sharpe": round(mean_is, 3),
+            "mean_oos_sharpe": round(mean_oos, 3),
+            "degradation": round(mean_oos / mean_is, 3) if abs(mean_is) > 1e-9 else 0.0,
+        },
+        "assumptions": {
+            "family": "momentum: position = sign(lookback-day cumulative return)",
+            "selection": "in-sample sharpe on each train segment",
+            "signal_lag": 1,
+            "cost_bps": cost_bps,
+            "point_in_time": True,
+        },
+    }
+
+
 def run_alpha_ensemble(closes: pd.DataFrame, predict_ahead: int = 1, folds: int = 12, min_obs: int = 80) -> dict[str, Any]:
     """在一个标的的收盘序列上训练 AlphaEnsemble,输出验证指标、前滚回测与下一期预测。
 
@@ -189,7 +308,7 @@ def run_alpha_ensemble(closes: pd.DataFrame, predict_ahead: int = 1, folds: int 
     最终在全部样本上重训得到下一期 ensemble 预测。
     样本不足时抛 ValueError,由调用方转成"数据不足"说明。
     """
-    close = closes["close"].astype(float).replace(0, np.nan).ffill()
+    close = closes["close"].astype(float).replace(0, np.nan)
     if len(close) < min_obs:
         raise ValueError(f"仅 {len(close)} 个交易日, 至少需要 {min_obs} 个交易日")
     feat = build_features(close.to_frame("close"))

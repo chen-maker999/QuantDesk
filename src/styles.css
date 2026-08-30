@@ -266,6 +266,8 @@ nav { overflow:auto; scrollbar-width:none; }
 .task-form textarea{min-height:72px;resize:vertical;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);padding:9px;outline:0;font-size:9px;color:var(--text);line-height:1.6}
 .task-form input:focus,.task-form select:focus,.task-form textarea:focus{border-color:var(--faint)}
 .task-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.task-trading-days{display:flex!important;flex-direction:row!important;align-items:center;gap:7px!important;font-size:9px;color:var(--muted);cursor:pointer}
+.task-trading-days input[type=checkbox]{width:13px;height:13px;accent-color:var(--accent)}
 .weekday-row{display:flex;gap:6px}
 .weekday-row button{width:30px;height:30px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2);font-size:9px;color:var(--muted)}
 .weekday-row button.active{background:var(--accent);color:var(--accent-contrast);border-color:transparent}

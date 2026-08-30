@@ -53,6 +53,33 @@ export const placeOrder = (p: OrderPayload): Promise<OrderResp> => j("/trade/ord
 export const cancelOrder = (orderId: number): Promise<OrderResp> => j("/trade/cancel", jsonInit({ order_id: orderId }));
 export const resetAccount = (): Promise<{ ok: boolean; error?: string }> => j("/trade/reset", { method: "POST" });
 
+// 账户级风控熔断（risk guard）
+export type RiskGuardStatus = {
+  ok: boolean; error?: string;
+  config: { daily_max_loss_pct: number; consecutive_loss_limit: number };
+  halted: boolean; halt_reason: string; halted_at: string; consec_losses: number;
+  day_date: string; day_baseline_equity: number | null;
+};
+export const getRiskGuard = (): Promise<RiskGuardStatus> => j("/trade/risk-guard");
+export const updateRiskGuard = (updates: Partial<{ daily_max_loss_pct: number; consecutive_loss_limit: number }>): Promise<RiskGuardStatus> => j("/trade/risk-guard", { ...jsonInit(updates), method: "PUT" });
+export const resumeRiskGuard = (): Promise<{ ok: boolean; error?: string }> => j("/trade/risk-guard/resume", { method: "POST" });
+
+// 条件单（止损 / 止盈 / 移动止损，保护性平仓）
+export type ConditionalKind = "stop_loss" | "take_profit" | "trailing_stop";
+export type ConditionalOrder = {
+  id: number; market: string; symbol: string; name: string | null;
+  kind: ConditionalKind; trigger_price: number | null; trailing_pct: number | null;
+  quantity: number; status: "pending" | "triggered" | "cancelled";
+  peak_price: number | null; triggered_order_id: number | null;
+  created_at: string; triggered_at: string | null;
+};
+export const CONDITIONAL_KIND_LABELS: Record<ConditionalKind, string> = {
+  stop_loss: "止损", take_profit: "止盈", trailing_stop: "移动止损",
+};
+export const getConditionalOrders = (status = ""): Promise<{ ok: boolean; error?: string; orders: ConditionalOrder[] }> => j(`/trade/conditional-orders${status ? `?status=${status}` : ""}`);
+export const createConditionalOrder = (p: { market: string; symbol: string; kind: ConditionalKind; quantity: number; trigger_price?: number | null; trailing_pct?: number | null }): Promise<{ ok: boolean; error?: string; order_id?: number }> => j("/trade/conditional", jsonInit(p));
+export const cancelConditionalOrder = (orderId: number): Promise<{ ok: boolean; error?: string }> => j("/trade/conditional/cancel", jsonInit({ order_id: orderId }));
+
 // 侧边标签映射
 export const SIDE_LABELS: Record<string, string> = {
   buy: "买入", sell: "卖出",

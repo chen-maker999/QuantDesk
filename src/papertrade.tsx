@@ -4,8 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, RefreshCw, RotateCcw, Search, X } from "lucide-react";
 import { fmtAmount, fmtNum, searchSymbols, toneOf, type SearchHit } from "./lib/market";
 import {
-  SIDE_LABELS, cancelOrder, getAccount, getOrders, getPositions, getTrades, placeOrder, resetAccount,
-  type PaperAccount, type PaperOrder, type PaperPosition, type PaperTrade,
+  CONDITIONAL_KIND_LABELS, SIDE_LABELS, cancelConditionalOrder, cancelOrder, createConditionalOrder,
+  getAccount, getConditionalOrders, getOrders, getPositions, getRiskGuard, getTrades, placeOrder,
+  resetAccount, resumeRiskGuard,
+  type ConditionalKind, type ConditionalOrder, type PaperAccount, type PaperOrder,
+  type PaperPosition, type PaperTrade, type RiskGuardStatus,
 } from "./lib/trade";
 
 const STOCK_SIDES = ["buy", "sell"] as const;
@@ -26,6 +29,12 @@ const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
   filled: { label: "已成交", cls: "green" },
   cancelled: { label: "已撤销", cls: "muted" },
 };
+const COND_STATUS_LABEL: Record<string, { label: string; cls: string }> = {
+  pending: { label: "监控中", cls: "orange" },
+  triggered: { label: "已触发", cls: "green" },
+  cancelled: { label: "已撤销", cls: "muted" },
+};
+const COND_KINDS: ConditionalKind[] = ["stop_loss", "take_profit", "trailing_stop"];
 
 function Stat({ label, value, tone, sub }: { label: string; value: string; tone?: "up" | "down" | "flat"; sub?: string }) {
   return (
@@ -53,14 +62,25 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
   const [positions, setPositions] = useState<PaperPosition[]>([]);
   const [orders, setOrders] = useState<PaperOrder[]>([]);
   const [trades, setTrades] = useState<PaperTrade[]>([]);
-  const [tab, setTab] = useState<"positions" | "orders" | "trades">("positions");
+  const [tab, setTab] = useState<"positions" | "orders" | "trades" | "conditional">("positions");
   const [armed, setArmed] = useState(0);
   const armedTimer = useRef<number | null>(null);
+  const [guard, setGuard] = useState<RiskGuardStatus | null>(null);
+  const [condOrders, setCondOrders] = useState<ConditionalOrder[]>([]);
+  const [mode, setMode] = useState<"order" | "conditional">("order");
+  const [condKind, setCondKind] = useState<ConditionalKind>("stop_loss");
+  const [condTrigger, setCondTrigger] = useState("");
+  const [condPct, setCondPct] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const [a, p, o, t] = await Promise.all([getAccount(), getPositions(), getOrders(), getTrades(100)]);
+      const [a, p, o, t, g, c] = await Promise.all([
+        getAccount(), getPositions(), getOrders(), getTrades(100),
+        getRiskGuard().catch(() => null), getConditionalOrders(),
+      ]);
       setAcc(a); setPositions(p.positions || []); setOrders(o.orders || []); setTrades(t.trades || []);
+      setGuard(g && g.ok !== false ? g : null);
+      setCondOrders(c.orders || []);
     } catch (e) { notify?.(e instanceof Error ? e.message : "加载模拟账户失败", "error"); }
   }, [notify]);
   useEffect(() => { void load(); }, [load]);
@@ -110,6 +130,41 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
     catch (e) { notify?.(e instanceof Error ? e.message : "撤单失败", "error"); }
   };
 
+  const submitConditional = async () => {
+    const symbol = sel?.symbol || query.trim();
+    if (!symbol) { notify?.("请先输入标的代码", "error"); return; }
+    const quantity = Number(qty);
+    if (!(quantity > 0)) { notify?.("请输入大于 0 的数量", "error"); return; }
+    const trigger = Number(condTrigger);
+    const pct = Number(condPct);
+    if (condKind === "trailing_stop") {
+      if (!(pct > 0 && pct < 100)) { notify?.("回撤比例需在 0-100 之间", "error"); return; }
+    } else if (!(trigger > 0)) { notify?.("请填写触发价格", "error"); return; }
+    setBusy(true);
+    try {
+      const r = await createConditionalOrder({
+        market, symbol, kind: condKind, quantity,
+        trigger_price: condKind === "trailing_stop" ? null : trigger,
+        trailing_pct: condKind === "trailing_stop" ? pct / 100 : null,
+      });
+      if (!r.ok) notify?.(r.error || "条件单创建失败", "error");
+      else notify?.(`条件单已创建：${CONDITIONAL_KIND_LABELS[condKind]} ${symbol} ×${quantity}`, "ok");
+      setQty(""); setCondTrigger(""); setCondPct("");
+      void load();
+    } catch (e) { notify?.(e instanceof Error ? e.message : "条件单创建失败", "error"); }
+    finally { setBusy(false); }
+  };
+
+  const cancelCond = async (id: number) => {
+    try { const r = await cancelConditionalOrder(id); notify?.(r.ok ? "条件单已撤销" : r.error || "撤销失败", r.ok ? "ok" : "error"); void load(); }
+    catch (e) { notify?.(e instanceof Error ? e.message : "撤销失败", "error"); }
+  };
+
+  const doResume = async () => {
+    try { const r = await resumeRiskGuard(); notify?.(r.ok ? "风控熔断已恢复，可继续开仓" : r.error || "恢复失败", r.ok ? "ok" : "error"); void load(); }
+    catch (e) { notify?.(e instanceof Error ? e.message : "恢复失败", "error"); }
+  };
+
   const doReset = () => {
     const now = Date.now();
     if (!armed || now - armed > 3000) { setArmed(now); if (armedTimer.current) window.clearTimeout(armedTimer.current); armedTimer.current = window.setTimeout(() => setArmed(0), 3000); return; }
@@ -130,6 +185,15 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
     setQuery(`${p.name || ""} ${p.symbol}`.trim());
     if (p.market === "futures") setFutName(p.name || "");
     setQty(String(Math.abs(p.quantity)));
+  };
+
+  // 从持仓一键进入条件单模式（保护性平仓预填）
+  const prefillProtect = (p: PaperPosition) => {
+    prefill(p);
+    setMode("conditional");
+    setCondKind("stop_loss");
+    setCondTrigger("");
+    setCondPct("");
   };
 
   const assetDelta = (acc?.total_asset ?? 0) - (acc?.initial_cash ?? 0);
@@ -156,6 +220,20 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
         <Stat label="已实现盈亏" value={`${(acc?.realized_pnl ?? 0) >= 0 ? "+" : ""}${fmtAmount(acc?.realized_pnl)}`} tone={pnl(acc?.realized_pnl)} />
       </div>
       {acc?.risk_limits && <div className="card paper-risk-policy"><b>预交易风控（模拟盘）</b><span>单笔 ≤ {(acc.risk_limits.max_order_notional_pct * 100).toFixed(0)}% · 单标的 ≤ {(acc.risk_limits.max_single_position_pct * 100).toFixed(0)}% · 总敞口 ≤ {(acc.risk_limits.max_gross_exposure_pct * 100).toFixed(0)}% · 期货保证金 ≤ {(acc.risk_limits.max_futures_margin_pct * 100).toFixed(0)}% · 挂单 ≤ {acc.risk_limits.max_pending_orders}</span></div>}
+      {guard && (guard.halted ? (
+        <div className="card paper-guard-banner halted">
+          <div className="pgb-text">
+            <b>账户风控熔断中 — 新开仓已禁止</b>
+            <span>{guard.halt_reason}（{guard.halted_at}）。平仓不受影响；确认风险后可手动恢复。</span>
+          </div>
+          <button className="secondary-btn" onClick={() => void doResume()}>恢复交易</button>
+        </div>
+      ) : (
+        <div className="card paper-guard-banner ok">
+          <b>账户风控正常</b>
+          <span>日亏损熔断 {(guard.config.daily_max_loss_pct * 100).toFixed(0)}% · 连亏 {guard.config.consecutive_loss_limit} 笔熔断 · 当日连亏 {guard.consec_losses} 笔</span>
+        </div>
+      ))}
 
       {/* 交易表单 + 列表 */}
       <div className="paper-layout">
@@ -167,6 +245,24 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
               <button className={market === "futures" ? "active" : ""} onClick={() => setMarket("futures")}>期货</button>
             </div>
           </div>
+
+          {/* 模式: 普通单 / 条件单 */}
+          <label className="paper-field">模式
+            <div className="segmented">
+              <button className={mode === "order" ? "active" : ""} onClick={() => setMode("order")}>普通单</button>
+              <button className={mode === "conditional" ? "active" : ""} onClick={() => setMode("conditional")}>条件单（保护性平仓）</button>
+            </div>
+          </label>
+
+          {mode === "conditional" && (
+            <label className="paper-field">条件类型
+              <div className="segmented">
+                {COND_KINDS.map(k => (
+                  <button key={k} className={condKind === k ? "active" : ""} onClick={() => setCondKind(k)}>{CONDITIONAL_KIND_LABELS[k]}</button>
+                ))}
+              </div>
+            </label>
+          )}
 
           {/* 标的 */}
           <label className="paper-field">标的
@@ -193,38 +289,55 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
           </label>
 
           {/* 方向 */}
-          <label className="paper-field">方向
-            <div className="segmented paper-sides">
-              {sides.map(s => (
-                <button key={s} className={`${side === s ? "active" : ""} side-${SIDE_TONE[s]}`} onClick={() => setSide(s)}>{SIDE_LABELS[s]}</button>
-              ))}
-            </div>
-          </label>
+          {mode === "order" && (
+            <label className="paper-field">方向
+              <div className="segmented paper-sides">
+                {sides.map(s => (
+                  <button key={s} className={`${side === s ? "active" : ""} side-${SIDE_TONE[s]}`} onClick={() => setSide(s)}>{SIDE_LABELS[s]}</button>
+                ))}
+              </div>
+            </label>
+          )}
 
           {/* 价格类型 */}
-          <label className="paper-field">类型
-            <div className="segmented">
-              <button className={orderType === "market" ? "active" : ""} onClick={() => setOrderType("market")}>市价</button>
-              <button className={orderType === "limit" ? "active" : ""} onClick={() => setOrderType("limit")}>限价</button>
-            </div>
-          </label>
+          {mode === "order" && (
+            <label className="paper-field">类型
+              <div className="segmented">
+                <button className={orderType === "market" ? "active" : ""} onClick={() => setOrderType("market")}>市价</button>
+                <button className={orderType === "limit" ? "active" : ""} onClick={() => setOrderType("limit")}>限价</button>
+              </div>
+            </label>
+          )}
 
           <div className="paper-num-row">
-            <label className="paper-field">{orderType === "limit" ? "委托价" : "现价"}<input className="paper-num" value={orderType === "limit" ? price : ""} disabled={orderType === "market"} onChange={e => setPrice(e.target.value)} placeholder={orderType === "market" ? "市价成交" : "价格"} /></label>
+            {mode === "order" ? (
+              <label className="paper-field">{orderType === "limit" ? "委托价" : "现价"}<input className="paper-num" value={orderType === "limit" ? price : ""} disabled={orderType === "market"} onChange={e => setPrice(e.target.value)} placeholder={orderType === "market" ? "市价成交" : "价格"} /></label>
+            ) : condKind === "trailing_stop" ? (
+              <label className="paper-field">回撤比例 (%)<input className="paper-num" value={condPct} onChange={e => setCondPct(e.target.value)} placeholder="如 3 表示 3%" inputMode="decimal" /></label>
+            ) : (
+              <label className="paper-field">触发价<input className="paper-num" value={condTrigger} onChange={e => setCondTrigger(e.target.value)} placeholder={condKind === "stop_loss" ? "低于此价触发" : "高于此价触发"} inputMode="decimal" /></label>
+            )}
             <label className="paper-field">数量<input className="paper-num" value={qty} onChange={e => setQty(e.target.value)} placeholder="手 / 股" inputMode="numeric" /></label>
           </div>
 
-          <button className="primary-btn paper-submit" disabled={busy} onClick={() => void submit()}>
+          <button className="primary-btn paper-submit" disabled={busy} onClick={() => void (mode === "order" ? submit() : submitConditional())}>
             {busy ? <RefreshCw className="spin" size={14} /> : <CheckCircle2 size={14} />}
-            {SIDE_LABELS[side] || side} {sel?.symbol || query || (market === "futures" ? "指定代码" : "")}
+            {mode === "order"
+              ? `${SIDE_LABELS[side] || side} ${sel?.symbol || query || (market === "futures" ? "指定代码" : "")}`
+              : `${CONDITIONAL_KIND_LABELS[condKind]}条件单 ${sel?.symbol || query || ""}`}
           </button>
-          <p className="paper-hint">市价单按实时价撮合；限价买单需 ≥ 现价、卖单需 ≤ 现价才成交，未触发则挂单可撤。股票买入扣全额资金，期货开仓只扣保证金（12%）；所有开仓均先经过预交易风控。</p>
+          {mode === "order" ? (
+            <p className="paper-hint">市价单按实时价撮合；限价买单需 ≥ 现价、卖单需 ≤ 现价才成交，未触发则挂单可撤。股票买入扣全额资金，期货开仓只扣保证金（12%）；所有开仓均先经过预交易风控。</p>
+          ) : (
+            <p className="paper-hint">条件单为保护性平仓单：仅对已有持仓生效，按最新价监控，触发后自动市价平仓并推送通知；移动止损按持仓期最优价回撤比例触发。挂单与触发均不产生额外费用。</p>
+          )}
         </div>
 
         <div className="paper-lists">
           <div className="segmented paper-list-tabs">
             <button className={tab === "positions" ? "active" : ""} onClick={() => setTab("positions")}>持仓 <b>{positions.length}</b></button>
             <button className={tab === "orders" ? "active" : ""} onClick={() => setTab("orders")}>今日委托 <b>{orders.length}</b></button>
+            <button className={tab === "conditional" ? "active" : ""} onClick={() => setTab("conditional")}>条件单 <b>{condOrders.length}</b></button>
             <button className={tab === "trades" ? "active" : ""} onClick={() => setTab("trades")}>今日成交 <b>{trades.length}</b></button>
           </div>
 
@@ -244,7 +357,10 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
                     <td className="num">{fmtAmount(p.market_value)}</td>
                     <td className={`num tone-${pnl(p.unrealized_pnl)}`}>{p.unrealized_pnl >= 0 ? "+" : ""}{fmtAmount(p.unrealized_pnl)}</td>
                     <td className={`num tone-${pnl(p.day_pnl)}`}>{p.day_pnl >= 0 ? "+" : ""}{fmtAmount(p.day_pnl)}</td>
-                    <td><button className="secondary-btn paper-pre" onClick={() => prefill(p)}>{p.market === "a" ? "卖出" : p.side_label.includes("多") ? "平多" : "平空"}</button></td>
+                    <td><span className="paper-pre-row">
+                      <button className="secondary-btn paper-pre" onClick={() => prefill(p)}>{p.market === "a" ? "卖出" : p.side_label.includes("多") ? "平多" : "平空"}</button>
+                      <button className="secondary-btn paper-pre" title="为该持仓创建止损/止盈/移动止损" onClick={() => prefillProtect(p)}>条件</button>
+                    </span></td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -266,6 +382,30 @@ export function PaperTradePage({ notify }: { notify?: (m: string, t?: "ok" | "er
                       <td className="num">{o.quantity}</td>
                       <td><span className={`paper-status st-${st.cls}`}>{st.label}</span></td>
                       <td>{o.status === "pending" ? <button className="secondary-btn paper-pre" onClick={() => void cancel(o.id)}>撤单</button> : <span className="paper-muted">—</span>}</td>
+                    </tr>
+                  );
+                })}</tbody>
+              </table>
+            )}
+
+            {tab === "conditional" && (
+              condOrders.length === 0 ? <PaperEmpty text="暂无条件单" /> :
+              <table className="rank-table">
+                <thead><tr><th>时间</th><th>标的</th><th>类型</th><th>条件</th><th className="num">数量</th><th>状态</th><th></th></tr></thead>
+                <tbody>{condOrders.map(o => {
+                  const st = COND_STATUS_LABEL[o.status] || COND_STATUS_LABEL.pending;
+                  const cond = o.kind === "trailing_stop"
+                    ? `自峰值回撤 ${((o.trailing_pct ?? 0) * 100).toFixed(1)}%`
+                    : `触发价 ${fmtNum(o.trigger_price ?? 0)}`;
+                  return (
+                    <tr key={o.id}>
+                      <td><small className="paper-time">{o.created_at.slice(5, 19)}</small></td>
+                      <td><b className="rank-name">{o.name || "—"}</b> <code>{o.symbol}</code></td>
+                      <td>{CONDITIONAL_KIND_LABELS[o.kind] || o.kind}</td>
+                      <td>{cond}</td>
+                      <td className="num">{o.quantity}</td>
+                      <td><span className={`paper-status st-${st.cls}`}>{st.label}</span></td>
+                      <td>{o.status === "pending" ? <button className="secondary-btn paper-pre" onClick={() => void cancelCond(o.id)}>撤销</button> : <span className="paper-muted">—</span>}</td>
                     </tr>
                   );
                 })}</tbody>

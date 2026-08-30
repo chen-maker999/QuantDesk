@@ -2,19 +2,24 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity, AlertTriangle, ArrowRight, ArrowUpRight, BarChart3, Bell, Bot, BrainCircuit, BriefcaseBusiness, Cable,
   CalendarClock, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
   ChevronsRight, Circle, Clock3, Command, Database, ExternalLink, FileDown, FileUp, FlaskConical, Gauge, Globe, Landmark,
   Copy, KeyRound, LayoutDashboard, ListOrdered, Menu, Minus, Moon, MoreHorizontal, Newspaper, Pause, Play, Plus, RefreshCw, Search, Unlock,
-  Settings, ShieldCheck, Sparkles, Square, Sun, Target, Trash2, TrendingUp, X, Zap
+  Settings, ShieldCheck, Sparkles, Square, Sun, Target, Trash2, TrendingUp, LogOut, X, Zap
 } from "lucide-react";
 import {
-  configureEngine, getRecentAudit, getWebhook, getWorkspaceStatus, hasApiKey, importHoldingRows, importMarketRows,
-  runBacktest, runEnsemble, saveApiKey, setWebhook, startEngine, streamAgent, syncMarketData, syncPublicQuotes, syncTushareData, type AccessMode, type AgentEvent, type EnsembleResult, type ReasoningLevel, type WorkspaceStatus
+  configureEngine, approveAgentApproval, engineFetch, getAgentUsage, getAutoModel, getProviderModels, getPushPublicKey, getRecentAudit, getWebhook, getWorkspaceStatus, hasApiKey, importHoldingRows, importMarketRows, totpConfirm, totpSetup,
+  type ProviderModel,
+  listAgentApprovals, rejectAgentApproval, runBacktest, runEnsemble, runWalkForward, saveApiKey, pushSubscribe, pushTest, pushUnsubscribe, setWebhook, startEngine, streamAgent, syncMarketData, syncPublicQuotes, syncTushareData,
+  getAuthStatus, authLogout, onUnauthorized, resolveEngineAssetUrl, type AccessMode, type AgentApproval, type AgentEvent, type AgentUsageResult, type AuthStatus, type EnsembleResult, type ReasoningLevel, type WalkForwardResult, type WorkspaceStatus
 } from "./lib/backend";
+import AuthScreen from "./AuthScreen";
 import { deleteTask as deleteRemoteTask, describeFrequency, describeNext, loadTasks, runTaskNow, saveTasks, tasksEqual, type ScheduledTask } from "./lib/scheduler";
+import { disablePush, enablePush, pushEnabledFlag, pushSupported } from "./lib/push";
 import { assistantText, chatId, deleteThread, getActiveChatId, loadThread, loadThreads, setActiveChatId, syncThreadsFromServer, titleFromPrompt, upsertThread, type ChatThread, type ChatTurn } from "./lib/chats";
 import { forgetRun, cancelAgentRun, getQueue, getRunInfo, hasUnreadRun, isThreadRunning, onRunsChange, removeQueuedRun, setActiveThread, startAgentRun } from "./lib/agent-runs";
 import { AlertsCard, FactorResearchCard, NotificationsCard, PortfolioBacktestCard } from "./research";
@@ -30,21 +35,24 @@ import altasDark from "./assets/altas-dark.png";
 type PageId="agent"|"overview"|"sessions"|"models"|"backtest"|"data"|"portfolio"|"risk"|"browser"|"tasks"|"settings"|"market"|"rankings"|"news"|"stock"|"papertrade"|"brokeroms";
 type Theme="light"|"dark"|"system";
 type Notify=(message:string,tone?:"ok"|"error")=>void;
-type ApiProvider="OpenAI"|"DeepSeek"|"Qwen"|"AlphaVantage"|"Tushare";
-const providerForModel=(model:string):"openai"|"deepseek"|"qwen"=>model.startsWith("deepseek-")?"deepseek":model.startsWith("qwen")?"qwen":"openai";
-const providerReady=(status:WorkspaceStatus,model:string)=>{const provider=providerForModel(model);return provider==="openai"?status.agent_configured:provider==="deepseek"?status.deepseek_configured:status.qwen_configured};
-const providerLabel=(model:string)=>{const provider=providerForModel(model);return provider==="openai"?"OpenAI":provider==="deepseek"?"DeepSeek":"Qwen"};
+type ApiProvider="OpenAI"|"DeepSeek"|"Qwen"|"OpenRouter"|"AlphaVantage"|"Tushare";
+const providerForModel=(model:string):"openai"|"deepseek"|"qwen"|"openrouter"=>model==="auto"?"openrouter":model.includes("/")?"openrouter":model.startsWith("deepseek-")?"deepseek":model.startsWith("qwen")?"qwen":"openai";
+const providerReady=(status:WorkspaceStatus,model:string)=>{const provider=providerForModel(model);return provider==="openai"?status.agent_configured:provider==="deepseek"?status.deepseek_configured:provider==="qwen"?status.qwen_configured:status.openrouter_configured};
+const providerLabel=(model:string)=>{const provider=providerForModel(model);return provider==="openai"?"OpenAI":provider==="deepseek"?"DeepSeek":provider==="qwen"?"Qwen":"OpenRouter"};
 const apiProviderForModel=(model:string):ApiProvider=>providerLabel(model) as ApiProvider;
+// 聊天输入框模型切换触发器上显示的短名：去掉厂商前缀（anthropic/xx → xx）
+const shortModelName=(model:string)=>model==="auto"?"Auto":model.includes("/")?model.slice(model.lastIndexOf("/")+1):model;
 const applyFontScale=(scale:number)=>{const root=document.getElementById("root");if(root)root.style.zoom=scale===1?"":String(scale)};
 const withProviderConfigured=(status:WorkspaceStatus,provider:ApiProvider):WorkspaceStatus=>{
   if(provider==="OpenAI")return {...status,agent_configured:true};
   if(provider==="DeepSeek")return {...status,deepseek_configured:true};
   if(provider==="Qwen")return {...status,qwen_configured:true};
+  if(provider==="OpenRouter")return {...status,openrouter_configured:true};
   if(provider==="AlphaVantage")return {...status,market_provider_configured:true,market_provider:"alpha_vantage"};
   return {...status,tushare_configured:true};
 };
 
-const emptyStatus:WorkspaceStatus={market_rows:0,market_symbols:0,market_latest:null,holding_count:0,portfolio_value:null,experiment_count:0,model_count:0,audit_count:0,agent_configured:false,deepseek_configured:false,qwen_configured:false,market_provider_configured:false,market_provider:null,tushare_configured:false};
+const emptyStatus:WorkspaceStatus={market_rows:0,market_symbols:0,market_latest:null,holding_count:0,portfolio_value:null,experiment_count:0,model_count:0,audit_count:0,agent_configured:false,deepseek_configured:false,qwen_configured:false,openrouter_configured:false,market_provider_configured:false,market_provider:null,tushare_configured:false};
 const pageTitles:Record<PageId,{title:string;subtitle:string}>={
   agent:{title:"投资 Agent",subtitle:"提出目标，Agent 将叙述过程、调用工具并交付可审计结果"},
   overview:{title:"工作区",subtitle:"只显示来自本地数据库的真实状态"},
@@ -79,8 +87,17 @@ const PROVIDER_URLS:Record<ApiProvider,string>={
   OpenAI:"https://platform.openai.com/api-keys",
   DeepSeek:"https://platform.deepseek.com/api_keys",
   Qwen:"https://bailian.console.aliyun.com/?apiKey=1",
+  OpenRouter:"https://openrouter.ai/settings/keys",
   AlphaVantage:"https://www.alphavantage.co/support/#api-key",
   Tushare:"https://tushare.pro/register",
+};
+// 每个提供商的兜底模型清单（目录接口失败时显示）；在线目录以引擎 /providers/models 为准。
+const PROVIDER_MODELS:Record<ApiProvider,{value:string;label:string}[]>={
+  OpenAI:[{value:"gpt-5.5",label:"gpt-5.5"},{value:"gpt-5.4",label:"gpt-5.4"},{value:"gpt-5.4-mini",label:"gpt-5.4-mini"},{value:"gpt-4o",label:"gpt-4o"},{value:"gpt-4o-mini",label:"gpt-4o-mini"}],
+  DeepSeek:[{value:"deepseek-v4-flash",label:"deepseek-v4-flash"},{value:"deepseek-v4-pro",label:"deepseek-v4-pro"},{value:"deepseek-chat",label:"deepseek-chat（旧别名）"},{value:"deepseek-reasoner",label:"deepseek-reasoner（旧别名）"}],
+  Qwen:[{value:"qwen3.8-max",label:"qwen3.8-max"},{value:"qwen3.7-plus",label:"qwen3.7-plus"},{value:"qwen3.7-flash",label:"qwen3.7-flash"},{value:"qwen-plus",label:"qwen-plus"},{value:"qwen-turbo",label:"qwen-turbo"},{value:"qwen-max",label:"qwen-max"}],
+  OpenRouter:[{value:"anthropic/claude-opus-4.7",label:"anthropic/claude-opus-4.7"},{value:"openai/gpt-5.4",label:"openai/gpt-5.4"},{value:"google/gemini-3.1-pro",label:"google/gemini-3.1-pro"},{value:"x-ai/grok-4",label:"x-ai/grok-4"}],
+  AlphaVantage:[],Tushare:[],
 };
 const algorithms=[
   {name:"异构集成预测",detail:"HistGradientBoosting · ExtraTrees · Ridge",icon:BrainCircuit,prompt:"使用已导入的真实数据训练并验证异构集成预测模型"},
@@ -113,6 +130,98 @@ function loadAccessMode():AccessMode{
 }
 
 function MiniBadge({children,tone="gray"}:{children:React.ReactNode;tone?:string}){return <span className={`badge ${tone}`}>{children}</span>}
+
+// ---------- Agent 审批中心（P0：pending 提案 → 批准真实执行 / 拒绝作废） ----------
+const APPROVAL_LABELS:Record<string,string>={
+  apply_portfolio_proposal:"写入组合提案",place_paper_order:"模拟下单",cancel_paper_order:"撤单",
+  update_paper_risk_limits:"更新模拟盘风控限额",create_scheduled_task:"创建定时任务",
+  delete_scheduled_task:"删除定时任务",manage_price_alerts:"预警管理",
+  manage_conditional_orders:"条件单",manage_risk_guard:"账户熔断",
+};
+function ApprovalCenter({notify}:{notify:Notify}){
+  const [items,setItems]=useState<AgentApproval[]>([]);
+  const [busyId,setBusyId]=useState<string|null>(null);
+  const load=useCallback(async()=>{try{setItems((await listAgentApprovals("pending")).approvals||[])}catch{/* 引擎未启动时静默 */}},[]);
+  useEffect(()=>{void load();const timer=setInterval(()=>void load(),8000);return()=>clearInterval(timer)},[load]);
+  const decide=async(id:string,approve:boolean)=>{
+    setBusyId(id);
+    try{
+      if(approve){const result=await approveAgentApproval(id);notify(`已批准并执行：${result.label} · ${result.detail}`,"ok")}
+      else{await rejectAgentApproval(id);notify("提案已拒绝","ok")}
+      await load();
+    }catch(error){notify(error instanceof Error?error.message:"审批操作失败","error")}
+    finally{setBusyId(null)}
+  };
+  if(items.length===0)return null;
+  return <section className="approval-center"><h3>审批中心 <span className="approval-count">{items.length}</span></h3>
+    {items.map(item=>{
+      const args=typeof item.arguments==="string"?(()=>{try{return JSON.parse(item.arguments) as Record<string,unknown>}catch{return {} as Record<string,unknown>}})():(item.arguments||{}) as Record<string,unknown>;
+      const summary=Object.entries(args).map(([k,v])=>`${k}=${typeof v==="object"?JSON.stringify(v):String(v)}`).join(" · ");
+      const impact=item.impact;
+      return <div className="approval-item" key={item.id}>
+        <b>{APPROVAL_LABELS[item.tool]||item.tool}</b>
+        {impact?.warning&&<p className={`approval-warning${impact.destructive?" destructive":""}`}>{String(impact.warning)}</p>}
+        {summary&&<code>{summary}</code>}
+        <div className="approval-actions">
+          <button className="primary-btn" disabled={busyId===item.id} onClick={()=>void decide(item.id,true)}>批准执行</button>
+          <button className="secondary-btn danger" disabled={busyId===item.id} onClick={()=>void decide(item.id,false)}>拒绝</button>
+        </div>
+      </div>;
+    })}
+  </section>;
+}
+
+// ---------- Agent 用量看板（Codex 风格：统计行 + Token 活动热力图 + 当日配额） ----------
+type HeatMode="daily"|"weekly"|"cumulative";
+function AgentUsageCard(){
+  const [usage,setUsage]=useState<AgentUsageResult|null>(null);
+  const [mode,setMode]=useState<HeatMode>("daily");
+  const heatRef=useRef<HTMLDivElement>(null);
+  const load=useCallback(async()=>{try{setUsage(await getAgentUsage(365))}catch{/* 引擎未启动时静默 */}},[]);
+  useEffect(()=>{void load();const timer=setInterval(()=>void load(),30000);return()=>clearInterval(timer)},[load]);
+  // 新数据/切换视图后把热力图滚到最右（今天在最后一列）
+  useEffect(()=>{const el=heatRef.current;if(el)el.scrollLeft=el.scrollWidth},[mode,usage]);
+  if(!usage)return null;
+  const today=usage.series[usage.series.length-1];
+  const quotaPct=usage.quota.daily_tool_calls>0?Math.min(100,Math.round(today.tool_calls/usage.quota.daily_tool_calls*100)):0;
+  const s=usage.stats;
+  const fmtTokens=(n:number)=>n>=1e8?`${(n/1e8).toFixed(1).replace(/\.0$/,"")}亿`:n>=1e4?`${(n/1e4).toFixed(1).replace(/\.0$/,"")}万`:n.toLocaleString();
+  const fmtDuration=(sec:number)=>sec<=0?"—":`${Math.floor(sec/3600)>0?`${Math.floor(sec/3600)} 小时 `:""}${Math.round(sec%3600/60)} 分`;
+  // 热力图: 按周分列(每周日开头), 每日=当天 tokens / 每周=周合计 / 累计=截至该周累计
+  const cells=usage.series.map(d=>({day:d.day,v:Math.max(0,d.tokens||0)}));
+  const lead=cells.length?new Date(`${cells[0].day}T00:00:00`).getDay():0;
+  const cols:Array<Array<{day:string|null;v:number}>>=[];
+  let cur:Array<{day:string|null;v:number}>=Array.from({length:lead},()=>({day:null,v:0}));
+  for(const c of cells){cur.push(c);if(cur.length===7){cols.push(cur);cur=[]}}
+  if(cur.length)cols.push([...cur,...Array.from({length:7-cur.length},()=>({day:null,v:0}))]);
+  const weekly=cols.map(col=>col.reduce((sum,c)=>sum+c.v,0));
+  const cumulative:Array<number>=[];let acc=0;for(const w of weekly){acc+=w;cumulative.push(acc)}
+  const colValues=mode==="daily"?null:mode==="weekly"?weekly:cumulative;
+  const visibleMax=Math.max(0,...(colValues??cols.flat().map(c=>c.v)));
+  const level=(v:number)=>v<=0?0:Math.min(4,1+Math.floor(v/(visibleMax||1)*4));
+  const monthMarks=cols.map((col,idx)=>{const first=col.find(c=>c.day);if(!first?.day)return "";const m=new Date(`${first.day}T00:00:00`).getMonth();const prev=idx>0?cols[idx-1].find(c=>c.day):undefined;const pm=prev?.day?new Date(`${prev.day}T00:00:00`).getMonth():-1;return m!==pm?`${m+1}月`:""});
+  return <section className="agent-usage-card">
+    <div className="usage-stats-row">
+      <div><b>{fmtTokens(s.totalTokens)}</b><small>累计 Token 数</small></div>
+      <div><b>{fmtTokens(s.peakTokens)}</b><small>峰值 Token 数</small></div>
+      <div><b>{fmtDuration(s.longestChatSeconds)}</b><small>最长聊天时长</small></div>
+      <div><b>{s.currentStreak} 天</b><small>当前连续天数</small></div>
+      <div><b>{s.longestStreak} 天</b><small>最长连续天数</small></div>
+    </div>
+    <div className="usage-heat-head"><b>Token 活动</b><span className="usage-mode">{([["daily","每日"],["weekly","每周"],["cumulative","累计"]] as const).map(([id,label])=><button key={id} className={mode===id?"active":""} onClick={()=>setMode(id)}>{label}</button>)}</span></div>
+    <div className="usage-heat-scroll" ref={heatRef}>
+      <div className={`usage-heat${mode==="daily"?"":" single"}`}>
+        {mode==="daily"
+          ?cols.flat().map((c,i)=>!c.day
+            ?<i key={i} className="heat-cell blank"/>
+            :<i key={i} className={`heat-cell lv${level(c.v)}`} title={`${c.day}：${fmtTokens(c.v)} tokens`}/>)
+          :cols.map((col,ci)=>{const v=(colValues??[])[ci]??0;const last=[...col].reverse().find(c=>c.day);return <i key={ci} className={`heat-cell lv${level(v)}`} title={last?.day?`截至 ${last.day}：${fmtTokens(v)} tokens`:""}/>;})}
+      </div>
+      <div className="usage-heat-months">{monthMarks.map((m,i)=><span key={i}>{m}</span>)}</div>
+    </div>
+    <div className="usage-quota"><span>今日配额</span><div className="usage-quota-track"><i style={{width:`${quotaPct}%`}}/></div><b>{today.tool_calls}/{usage.quota.daily_tool_calls}</b></div>
+  </section>;
+}
 
 function EmptyState({icon:Icon,title,description,action,actionLabel}:{icon:typeof Database;title:string;description:string;action:()=>void;actionLabel:string}){
   return <div className="real-empty"><span><Icon size={22}/></span><h2>{title}</h2><p>{description}</p><button className="primary-btn" onClick={action}>{actionLabel}<ArrowRight size={14}/></button></div>;
@@ -177,7 +286,7 @@ const AgentFeed=memo(function AgentFeed({turns,working}:{turns:ChatTurn[];workin
     const waiting=live&&!turn.events.some(e=>e.type==="done"||e.type==="error"||e.type==="narration"||e.type==="tool_start");
     return <div className="assistant-stream" data-turn={turn.id} key={turn.id}><div>
       {waiting&&<p className="thinking-shimmer">正在思考</p>}
-      {blocks.map((block,blockIndex)=>block.kind==="ops"?<OperationGroup key={blockIndex} events={block.events} live={live&&!turn.events.some(e=>e.type==="done"||e.type==="error")}/>:block.kind==="error"?<div className="inline-error" key={blockIndex}><AlertTriangle size={14}/><span>{block.text}</span></div>:<div className={`codex-copy ${block.conclusion?"final-answer":"narration"} ${live&&block.conclusion?"streaming-markdown":""}`} key={blockIndex}><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{block.text}</ReactMarkdown></div></div>)}
+      {blocks.map((block,blockIndex)=>block.kind==="compacting"?<div className={`compact-divider ${block.done?"done":""}`} key={blockIndex}><span className="compact-line"/><span className="compact-label">{block.done?"上下文已压缩":block.text||"正在压缩上下文"}</span><span className="compact-line"/></div>:block.kind==="ops"?<OperationGroup key={blockIndex} events={block.events} live={live&&!turn.events.some(e=>e.type==="done"||e.type==="error")}/>:block.kind==="error"?<div className="inline-error" key={blockIndex}><AlertTriangle size={14}/><span>{block.text}</span></div>:block.kind==="incomplete"?<div className="inline-error incomplete" key={blockIndex}><AlertTriangle size={14}/><span>{block.text}</span></div>:block.kind==="plan"?<div className="plan-card" key={blockIndex}><strong>任务计划</strong><ol>{block.text.split("\n").filter(Boolean).map((step,i)=><li key={i}>{step.replace(/^\d+\.\s*/,"")}</li>)}</ol></div>:<div className={`codex-copy ${block.conclusion?"final-answer":"narration"} ${live&&block.conclusion?"streaming-markdown":""}`} key={blockIndex}><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={resolveEngineAssetUrl}>{block.text}</ReactMarkdown></div></div>)}
     </div></div>;
   })}</>;
 });
@@ -192,16 +301,24 @@ function followUpSuggestions(status:WorkspaceStatus,role:RoleId):string[]{
   return [...new Set(picks)].slice(0,3);
 }
 
-function groupAssistantEvents(events:AgentEvent[]){  type Block={kind:"text";text:string;conclusion?:boolean}|{kind:"ops";events:AgentEvent[]}|{kind:"error";text:string};
+function groupAssistantEvents(events:AgentEvent[]){  type Block={kind:"text";text:string;conclusion?:boolean}|{kind:"ops";events:AgentEvent[]}|{kind:"error";text:string}|{kind:"plan";text:string}|{kind:"incomplete";text:string}|{kind:"compacting";text:string;done:boolean};
   const blocks:Block[]=[];
   let ops:AgentEvent[]=[];
   const flush=()=>{if(ops.length){blocks.push({kind:"ops",events:ops});ops=[]}};
   for(const event of events){
+    if(event.type==="tool_result"&&event.name==="submit_plan"){
+      flush();
+      blocks.push({kind:"plan",text:event.detail||""});
+      continue;
+    }
+    if(event.type==="tool_start"&&event.name==="submit_plan")continue;
     if(event.type==="tool_start"||event.type==="tool_result"){ops.push(event);continue}
     flush();
-    if((event.type==="narration"||event.type==="status")&&event.text)blocks.push({kind:"text",text:event.text});
+    if(event.type==="compacting")blocks.push({kind:"compacting",text:event.text||"",done:event.status==="completed"});
+    else if((event.type==="narration"||event.type==="status")&&event.text)blocks.push({kind:"text",text:event.text});
     else if(event.type==="done"&&event.text)blocks.push({kind:"text",text:event.text,conclusion:true});
     else if(event.type==="error")blocks.push({kind:"error",text:event.text||"出错了"});
+    else if(event.type==="incomplete")blocks.push({kind:"incomplete",text:event.text||"工具轮次已用尽，任务可能未完成。"});
   }
   flush();
   return blocks;
@@ -220,11 +337,15 @@ function ReasoningSlider({value,onChange}:{value:ReasoningLevel;onChange:(level:
   </div>;
 }
 
-function AgentPage({status,onNavigate,onSetup,ensureProvider,initialDraft,clearDraft,model,notify,ctxCollapsed,onToggleCtx,activeChatId,onChatId}:{status:WorkspaceStatus;onNavigate:(p:PageId)=>void;onSetup:(provider:ApiProvider)=>void;ensureProvider:(provider:ApiProvider)=>Promise<boolean>;initialDraft:string;clearDraft:()=>void;model:string;notify:Notify;ctxCollapsed:boolean;onToggleCtx:()=>void;activeChatId:string|null;onChatId:(id:string|null)=>void}){
+function AgentPage({status,onNavigate,onSetup,ensureProvider,initialDraft,clearDraft,model,setModel,notify,ctxCollapsed,onToggleCtx,activeChatId,onChatId}:{status:WorkspaceStatus;onNavigate:(p:PageId)=>void;onSetup:(provider:ApiProvider)=>void;ensureProvider:(provider:ApiProvider)=>Promise<boolean>;initialDraft:string;clearDraft:()=>void;model:string;setModel:(m:string)=>void;notify:Notify;ctxCollapsed:boolean;onToggleCtx:()=>void;activeChatId:string|null;onChatId:(id:string|null)=>void}){
   const [prompt,setPrompt]=useState(initialDraft);
   const [thread,setThread]=useState<ChatThread|null>(()=>loadThread(activeChatId||getActiveChatId()));
   const [history,setHistory]=useState<ChatThread[]>(()=>loadThreads());
   const [working,setWorking]=useState(false); const [startedAt,setStartedAt]=useState<number|null>(null); const [elapsed,setElapsed]=useState(0); const [accessMode,setAccessMode]=useState<AccessMode>(loadAccessMode); const [accessOpen,setAccessOpen]=useState(false); const [traceOpen,setTraceOpen]=useState(true); const [reasoning,setReasoning]=useState<ReasoningLevel>(()=>((localStorage.getItem("quant-reasoning") as ReasoningLevel)||"medium")); const [reasoningOpen,setReasoningOpen]=useState(false); const [role,setRole]=useState<RoleId>(loadRole); const [roleOpen,setRoleOpen]=useState(false);
+  const [modelOpen,setModelOpen]=useState(false); const [dynModels,setDynModels]=useState<Record<string,ProviderModel[]|null|undefined>>({}); const [autoModel,setAutoModel]=useState<string|null>(null); const [modelQuery,setModelQuery]=useState("");
+  useEffect(()=>{if(!modelOpen||autoModel)return;getAutoModel().then(r=>setAutoModel(r.model)).catch(()=>undefined)},[modelOpen,autoModel]);
+  // 打开卡片时按需拉取各已配置提供商的在线模型目录；undefined=未配置，[]=加载中，null=失败用兜底清单
+  useEffect(()=>{if(!modelOpen)return;const targets:{key:"openai"|"deepseek"|"qwen"|"openrouter";configured:boolean}[]=[{key:"openai",configured:status.agent_configured},{key:"deepseek",configured:status.deepseek_configured},{key:"qwen",configured:status.qwen_configured},{key:"openrouter",configured:status.openrouter_configured}];for(const target of targets){if(!target.configured||dynModels[target.key]!==undefined)continue;setDynModels(state=>({...state,[target.key]:[]}));getProviderModels(target.key).then(result=>setDynModels(state=>({...state,[target.key]:result.models}))).catch(()=>setDynModels(state=>({...state,[target.key]:null})))}},[modelOpen,status.agent_configured,status.deepseek_configured,status.qwen_configured,status.openrouter_configured,dynModels]);
   const [queueItems,setQueueItems]=useState<string[]>(()=>getQueue(activeChatId).map(item=>item.displayText));
   const showSuggestions=localStorage.getItem("quant-suggestions")!=="0";
   const feedRef=useRef<HTMLDivElement>(null);
@@ -299,7 +420,7 @@ function AgentPage({status,onNavigate,onSetup,ensureProvider,initialDraft,clearD
       threadId:current.id,
       prompt:`${modeContext}\n${responseContext}\n${roleContext}${customInstructions?`\n用户的长期指令：${customInstructions}`:""}\n\n用户目标：${text}`,
       displayText:text,
-      model,provider:providerForModel(model),reasoning,accessMode,
+      model,provider:providerForModel(model),reasoning,accessMode,role,
       onStart:()=>{
         const base=loadThread(current.id)||current;
         const now=Date.now();
@@ -317,6 +438,17 @@ function AgentPage({status,onNavigate,onSetup,ensureProvider,initialDraft,clearD
   const download=()=>{if(!thread)return;const text=thread.turns.map(turn=>turn.role==="user"?`用户：${turn.text}`:`助手：${turn.text||assistantText(turn.events)}`).filter(Boolean).join("\n\n");const url=URL.createObjectURL(new Blob([text],{type:"text/plain;charset=utf-8"}));const a=document.createElement("a");a.href=url;a.download=`quantdesk-chat-${thread.id}.txt`;a.click();URL.revokeObjectURL(url);notify("对话已导出")};
   const turns=thread?.turns||[];
   const hasChat=turns.length>0;
+  // Trae 式模型切换卡片：只列出已配置密钥的提供商及其模型（在线目录优先，失败退兜底清单）
+  const modelGroups=(()=>{
+    const groups:{provider:string;label:string;items:{value:string;label:string;meta?:string;free?:boolean}[]}[]=[];
+    const push=(provider:string,label:string,items:{value:string;label:string;meta?:string;free?:boolean}[])=>{if(items.length)groups.push({provider,label,items})};
+    const entries=(key:"openai"|"deepseek"|"qwen"|"openrouter",fallback:ApiProvider)=>{const dyn=dynModels[key];return dyn&&dyn.length?dyn.map(model=>({value:model.id,label:model.id,meta:key==="openrouter"?(model.free?"免费":`${Math.round((model.context||0)/1000)}K`):undefined,free:!!model.free})):PROVIDER_MODELS[fallback].map(model=>({value:model.value,label:model.label,free:false}))};
+    if(status.agent_configured)push("openai","OpenAI",entries("openai","OpenAI"));
+    if(status.deepseek_configured)push("deepseek","DeepSeek",entries("deepseek","DeepSeek"));
+    if(status.qwen_configured)push("qwen","Qwen / 阿里云百炼",entries("qwen","Qwen"));
+    if(status.openrouter_configured)push("openrouter","OpenRouter",entries("openrouter","OpenRouter"));
+    return groups;
+  })();
   return <div className={`agent-page-v3${ctxCollapsed?" ctx-collapsed":""}`}>
     <section className="codex-thread">
       <div className="codex-thread-head"><div><span><strong>{hasChat?thread?.title||"Quant Agent":"Quant Agent"}</strong><small>{providerReady(status,model)?`已连接 ${providerLabel(model)}`:`等待配置 ${providerLabel(model)} Key`}</small></span></div>{hasChat&&<div className="thread-head-actions"><button className="icon-btn" title="导出对话" onClick={download}><FileDown size={14}/></button></div>}</div>
@@ -329,9 +461,9 @@ function AgentPage({status,onNavigate,onSetup,ensureProvider,initialDraft,clearD
         </>}
       </div>
       </div>
-      <div className="agent-composer-v3"><div>{(reasoningOpen||accessOpen||roleOpen)&&<div className="popover-backdrop" onClick={()=>{setReasoningOpen(false);setAccessOpen(false);setRoleOpen(false)}}/>}{reasoningOpen&&<div className="reasoning-popover"><div className="reasoning-popover-head"><strong>思考等级</strong><small>{REASONING_DESC[reasoning]}</small></div><ReasoningSlider value={reasoning} onChange={level=>{setReasoning(level);localStorage.setItem("quant-reasoning",level)}}/></div>}{accessOpen&&<div className="access-popover">{ACCESS_MODES.map(mode=><button key={mode.id} className={`${accessMode===mode.id?"active":""}${mode.id==="full"?" access-full":""}`} onClick={()=>{setAccessMode(mode.id);localStorage.setItem("quant-access-mode",mode.id);setAccessOpen(false)}}><span><strong>{mode.label}</strong><small>{mode.hint}</small></span>{accessMode===mode.id&&<Check size={13}/>}</button>)}</div>}{roleOpen&&<div className="role-popover"><div className="reasoning-popover-head"><strong>Agent 角色</strong><small>角色决定 Agent 优先获取哪些信息、以什么方式分析</small></div>{ROLES.map(r=>{const Icon=r.icon;return <button key={r.id} className={role===r.id?"active":""} onClick={()=>{setRole(r.id);localStorage.setItem("quant-role",r.id);setRoleOpen(false)}}><Icon size={13}/><span><strong>{r.label}</strong><small>{r.hint}</small></span>{role===r.id&&<Check size={13}/>}</button>})}</div>}<textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{const ctrlSend=localStorage.getItem("quant-send-mode")==="ctrl-enter";if(e.key==="Enter"&&(ctrlSend?(e.ctrlKey||e.metaKey):!e.shiftKey)){e.preventDefault();void submit()}}} placeholder={localStorage.getItem("quant-send-mode")==="ctrl-enter"?`${hasChat?"继续提问":"描述投资目标"}，Ctrl+Enter 发送…`:`${hasChat?"继续提问":"描述投资目标"}，Enter 发送…`}/><div className="composer-row"><div><button className={`role-trigger ${roleOpen?"active":""}${role!=="general"?" role-set":""}`} onClick={()=>{setRoleOpen(v=>!v);setAccessOpen(false);setReasoningOpen(false)}} title="切换 Agent 角色"><Bot size={13}/>{ROLES.find(r=>r.id===role)?.label||"通用"}<ChevronDown size={12}/></button><button className={`access-trigger ${accessOpen?"active":""}${accessMode==="full"?" access-full":""}`} onClick={()=>{setAccessOpen(v=>!v);setReasoningOpen(false);setRoleOpen(false)}}>{accessMode==="full"?<Unlock size={13}/>:<ShieldCheck size={13}/>}{ACCESS_MODES.find(mode=>mode.id===accessMode)?.label}<ChevronDown size={12}/></button><span className="composer-divider"/><span className={`reasoning-trigger ${reasoningOpen?"active":""}`} onClick={()=>{setReasoningOpen(open=>!open);setAccessOpen(false);setRoleOpen(false)}} title="切换思考等级"><Sparkles size={13}/>思考 {REASONING_LABEL[reasoning]}</span></div><button className={`send-button${working?" stop":""}`} title={working?"停止本次运行":"发送"} disabled={!working&&!prompt.trim()} onClick={()=>{if(working){if(thread)cancelAgentRun(thread.id)}else void submit()}}>{working?<Square size={15}/>:<ArrowUpRight size={16}/>}</button></div></div>{hasChat&&showSuggestions&&!working&&<div className="suggest-chips">{followUpSuggestions(status,role).map(text=><button key={text} onClick={()=>void submit(text)}><Sparkles size={11}/>{text}</button>)}</div>}{queueItems.length>0&&<div className="run-queue"><span className="rq-label"><Clock3 size={12}/>排队中 {queueItems.length} 条，当前任务完成后依次运行</span>{queueItems.map((text,index)=><span className="queued-pill" key={`${index}-${text.slice(0,12)}`}><em>{text.length>46?`${text.slice(0,46)}…`:text}</em><i title="移除该排队任务" onClick={()=>{if(activeChatId)removeQueuedRun(activeChatId,index)}}><X size={10}/></i></span>)}</div>}{!hasChat&&showSuggestions&&<div className="quick-prompts">{(ROLES.find(r=>r.id===role)||ROLES[0]).prompts.map(text=><button key={text} onClick={()=>void submit(text)}>{text}</button>)}</div>}</div>
+      <div className="agent-composer-v3"><div>{(reasoningOpen||accessOpen||roleOpen||modelOpen)&&<div className="popover-backdrop" onClick={()=>{setReasoningOpen(false);setAccessOpen(false);setRoleOpen(false);setModelOpen(false)}}/>}{modelOpen&&<div className="model-popover"><div className="model-popover-head"><strong>切换模型</strong><small>仅显示已配置密钥的提供商；免费模型以灰色标识</small></div><div className="model-search"><Search size={12}/><input value={modelQuery} onChange={e=>setModelQuery(e.target.value)} placeholder="搜索模型…" autoFocus/></div><div className="model-popover-list">{modelGroups.length===0&&<p className="model-popover-empty">尚未配置任何模型 API，请先在设置中添加</p>}{<div><div className="model-group-label">自动</div><button className={model==="auto"?"active":""} onClick={()=>{if(!status.openrouter_configured){setModelOpen(false);onSetup("OpenRouter");notify("Auto 模式需要先配置 OpenRouter Key","error");return}setModel("auto");localStorage.setItem("quant-model","auto");setModelOpen(false);if(model!=="auto")notify("Auto 模式已开启，将调用免费模型")}}><span className="model-name">Auto</span><small>{autoModel?`免费 · ${autoModel}`:"自动选用免费模型"}</small>{model==="auto"&&<Check size={13}/>}</button></div>}{(()=>{const q=modelQuery.trim().toLowerCase();const groups=q?modelGroups.map(group=>({group,items:group.items.filter(item=>item.label.toLowerCase().includes(q)||item.value.toLowerCase().includes(q))})).filter(entry=>entry.items.length>0):modelGroups.map(group=>({group,items:group.items}));if(q&&groups.length===0)return <p className="model-popover-empty">没有匹配“{modelQuery}”的模型</p>;return groups.map(({group,items})=><div key={group.provider}><div className="model-group-label">{group.label}</div>{items.map(item=><button key={item.value} className={`${model===item.value?"active":""}${item.free?" free":""}`} onClick={()=>{setModel(item.value);localStorage.setItem("quant-model",item.value);setModelOpen(false);if(model!==item.value)notify(`已切换到 ${item.label}`)}}><span className="model-name">{item.label}</span>{item.meta&&<small>{item.meta}</small>}{model===item.value&&<Check size={13}/>}</button>)}</div>)})()}</div><button className="model-add" onClick={()=>{setModelOpen(false);onNavigate("settings")}}><Plus size={13}/>添加模型</button></div>}{reasoningOpen&&<div className="reasoning-popover"><div className="reasoning-popover-head"><strong>思考等级</strong><small>{REASONING_DESC[reasoning]}</small></div><ReasoningSlider value={reasoning} onChange={level=>{setReasoning(level);localStorage.setItem("quant-reasoning",level)}}/></div>}{accessOpen&&<div className="access-popover">{ACCESS_MODES.map(mode=><button key={mode.id} className={`${accessMode===mode.id?"active":""}${mode.id==="full"?" access-full":""}`} onClick={()=>{setAccessMode(mode.id);localStorage.setItem("quant-access-mode",mode.id);setAccessOpen(false)}}><span><strong>{mode.label}</strong><small>{mode.hint}</small></span>{accessMode===mode.id&&<Check size={13}/>}</button>)}</div>}{roleOpen&&<div className="role-popover"><div className="reasoning-popover-head"><strong>Agent 角色</strong><small>角色决定 Agent 优先获取哪些信息、以什么方式分析</small></div>{ROLES.map(r=>{const Icon=r.icon;return <button key={r.id} className={role===r.id?"active":""} onClick={()=>{setRole(r.id);localStorage.setItem("quant-role",r.id);setRoleOpen(false)}}><Icon size={13}/><span><strong>{r.label}</strong><small>{r.hint}</small></span>{role===r.id&&<Check size={13}/>}</button>})}</div>}<textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{const ctrlSend=localStorage.getItem("quant-send-mode")==="ctrl-enter";if(e.key==="Enter"&&(ctrlSend?(e.ctrlKey||e.metaKey):!e.shiftKey)){e.preventDefault();void submit()}}} placeholder={localStorage.getItem("quant-send-mode")==="ctrl-enter"?`${hasChat?"继续提问":"描述投资目标"}，Ctrl+Enter 发送…`:`${hasChat?"继续提问":"描述投资目标"}，Enter 发送…`}/><div className="composer-row"><div><button className={`model-trigger ${modelOpen?"active":""}`} onClick={()=>{setModelOpen(v=>!v);setModelQuery("");setAccessOpen(false);setReasoningOpen(false);setRoleOpen(false)}} title="切换模型"><BrainCircuit size={13}/>{shortModelName(model)}<ChevronDown size={12}/></button><button className={`role-trigger ${roleOpen?"active":""}${role!=="general"?" role-set":""}`} onClick={()=>{setRoleOpen(v=>!v);setAccessOpen(false);setReasoningOpen(false);setModelOpen(false)}} title="切换 Agent 角色"><Bot size={13}/>{ROLES.find(r=>r.id===role)?.label||"通用"}<ChevronDown size={12}/></button><button className={`access-trigger ${accessOpen?"active":""}${accessMode==="full"?" access-full":""}`} onClick={()=>{setAccessOpen(v=>!v);setReasoningOpen(false);setRoleOpen(false);setModelOpen(false)}}>{accessMode==="full"?<Unlock size={13}/>:<ShieldCheck size={13}/>}{ACCESS_MODES.find(mode=>mode.id===accessMode)?.label}<ChevronDown size={12}/></button><span className="composer-divider"/><span className={`reasoning-trigger ${reasoningOpen?"active":""}`} onClick={()=>{setReasoningOpen(open=>!open);setAccessOpen(false);setRoleOpen(false);setModelOpen(false)}} title="切换思考等级"><Sparkles size={13}/>思考 {REASONING_LABEL[reasoning]}</span></div><button className={`send-button${working?" stop":""}`} title={working?"停止本次运行":"发送"} disabled={!working&&!prompt.trim()} onClick={()=>{if(working){if(thread)cancelAgentRun(thread.id)}else void submit()}}>{working?<Square size={15}/>:<ArrowUpRight size={16}/>}</button></div></div>{hasChat&&showSuggestions&&!working&&<div className="suggest-chips">{followUpSuggestions(status,role).map(text=><button key={text} onClick={()=>void submit(text)}><Sparkles size={11}/>{text}</button>)}</div>}{queueItems.length>0&&<div className="run-queue"><span className="rq-label"><Clock3 size={12}/>排队中 {queueItems.length} 条，当前任务完成后依次运行</span>{queueItems.map((text,index)=><span className="queued-pill" key={`${index}-${text.slice(0,12)}`}><em>{text.length>46?`${text.slice(0,46)}…`:text}</em><i title="移除该排队任务" onClick={()=>{if(activeChatId)removeQueuedRun(activeChatId,index)}}><X size={10}/></i></span>)}</div>}{!hasChat&&showSuggestions&&<div className="quick-prompts">{(ROLES.find(r=>r.id===role)||ROLES[0]).prompts.map(text=><button key={text} onClick={()=>void submit(text)}>{text}</button>)}</div>}</div>
     </section>
-    {ctxCollapsed?<div className="ctx-rail"><button className="icon-btn rail-expand" title="展开上下文面板" onClick={onToggleCtx}><ChevronsLeft size={16}/></button><span className="rail-caption">上下文</span></div>:<aside className="agent-context-v3"><div className="ctx-head"><button className="icon-btn ctx-collapse" title="折叠上下文面板" onClick={onToggleCtx}><ChevronsRight size={15}/></button></div><section><h3>对话历史</h3>{history.length===0?<p className="chat-empty">还没有保存的对话</p>:<div className="chat-history-list">{history.slice(0,12).map(item=>{const run=getRunInfo(item.id);const running=run?.status==="running";const unread=run?.status==="done"&&run.unread;return <button key={item.id} className={thread?.id===item.id?"active":""} onClick={()=>openThread(item.id)}><span><b>{item.title}</b><small>{new Date(item.updatedAt).toLocaleString()}</small></span>{running?<i className="chat-run-spin" title="Agent 正在运行"/>:unread?<i className="chat-run-dot" title="Agent 已完成,点开查看"/>:null}<i className="chat-del" title="删除" onClick={e=>{e.stopPropagation();removeThread(item.id)}}><X size={12}/></i></button>})}</div>}</section><section><h3>工作区上下文</h3><button onClick={()=>onNavigate("data")}><Database/><span><b>市场数据</b><small>{status.market_rows?`${status.market_symbols} 个标的 · ${status.market_latest}`:"未导入"}</small></span><ChevronRight/></button><button onClick={()=>onNavigate("portfolio")}><BriefcaseBusiness/><span><b>投资组合</b><small>{status.holding_count?`${status.holding_count} 个持仓`:"未导入"}</small></span><ChevronRight/></button><button onClick={()=>onNavigate("models")}><BrainCircuit/><span><b>算法工具</b><small>4 类本地算法</small></span><ChevronRight/></button></section><section><h3>权限边界</h3><div className="permission-line"><i className="ok"/>读取本地数据<MiniBadge tone="green">允许</MiniBadge></div><div className="permission-line"><i className="ok"/>运行研究工具<MiniBadge tone="green">允许</MiniBadge></div><div className="permission-line"><i className={accessMode==="full"?"":"warn"}/>修改组合<MiniBadge tone={accessMode==="full"?"red":"orange"}>{accessMode==="full"?"完全访问":"仅提案"}</MiniBadge></div><div className="permission-line"><i/>真实交易<MiniBadge>禁用</MiniBadge></div></section><section><h3>运行模型</h3><button onClick={()=>onNavigate("settings")}><Gauge/><span><b>{model}</b><small>在设置中切换</small></span><ChevronRight/></button></section></aside>}
+    {ctxCollapsed?<div className="ctx-rail"><button className="icon-btn rail-expand" title="展开上下文面板" onClick={onToggleCtx}><ChevronsLeft size={16}/></button><span className="rail-caption">上下文</span></div>:<aside className="agent-context-v3"><div className="ctx-head"><button className="icon-btn ctx-collapse" title="折叠上下文面板" onClick={onToggleCtx}><ChevronsRight size={15}/></button></div><ApprovalCenter notify={notify}/><AgentUsageCard/><section><h3>对话历史</h3>{history.length===0?<p className="chat-empty">还没有保存的对话</p>:<div className="chat-history-list">{history.slice(0,12).map(item=>{const run=getRunInfo(item.id);const running=run?.status==="running";const unread=run?.status==="done"&&run.unread;return <button key={item.id} className={thread?.id===item.id?"active":""} onClick={()=>openThread(item.id)}><span><b>{item.title}</b><small>{new Date(item.updatedAt).toLocaleString()}</small></span>{running?<i className="chat-run-spin" title="Agent 正在运行"/>:unread?<i className="chat-run-dot" title="Agent 已完成,点开查看"/>:null}<i className="chat-del" title="删除" onClick={e=>{e.stopPropagation();removeThread(item.id)}}><X size={12}/></i></button>})}</div>}</section><section><h3>工作区上下文</h3><button onClick={()=>onNavigate("data")}><Database/><span><b>市场数据</b><small>{status.market_rows?`${status.market_symbols} 个标的 · ${status.market_latest}`:"未导入"}</small></span><ChevronRight/></button><button onClick={()=>onNavigate("portfolio")}><BriefcaseBusiness/><span><b>投资组合</b><small>{status.holding_count?`${status.holding_count} 个持仓`:"未导入"}</small></span><ChevronRight/></button><button onClick={()=>onNavigate("models")}><BrainCircuit/><span><b>算法工具</b><small>4 类本地算法</small></span><ChevronRight/></button></section><section><h3>权限边界</h3><div className="permission-line"><i className="ok"/>读取本地数据<MiniBadge tone="green">允许</MiniBadge></div><div className="permission-line"><i className="ok"/>运行研究工具<MiniBadge tone="green">允许</MiniBadge></div><div className="permission-line"><i className={accessMode==="full"?"":"warn"}/>修改组合<MiniBadge tone={accessMode==="full"?"red":"orange"}>{accessMode==="full"?"完全访问":"仅提案"}</MiniBadge></div><div className="permission-line"><i/>真实交易<MiniBadge>禁用</MiniBadge></div></section><section><h3>运行模型</h3><button onClick={()=>setModelOpen(true)}><Gauge/><span><b>{shortModelName(model)}</b><small>点击切换模型</small></span><ChevronRight/></button></section></aside>}
   </div>;
 }
 
@@ -410,11 +542,38 @@ function PortfolioPage({status,onImported,launchAgent,notify}:{status:WorkspaceS
   return <div className="page-body v3-page"><input ref={input} hidden type="file" accept=".csv,text/csv" onChange={e=>{const file=e.target.files?.[0];if(file)void importFile(file)}}/>{status.holding_count===0?<EmptyState icon={BriefcaseBusiness} title="还没有真实持仓" description="导入包含 symbol、quantity 的 CSV；可选字段为 name、avg_cost、market_value。导入会替换当前持仓。" action={()=>input.current?.click()} actionLabel="导入持仓 CSV"/>:<><div className="portfolio-real card"><BriefcaseBusiness/><span><small>真实持仓</small><strong>{status.holding_count} 个标的</strong><em>{status.portfolio_value?`市值 ¥${status.portfolio_value.toLocaleString()}`:"未提供 market_value"}</em></span><button className="secondary-btn" disabled={busy} onClick={()=>input.current?.click()}><FileUp size={13}/>重新导入</button><button className="primary-btn" onClick={()=>launchAgent("基于我的真实持仓和价格历史，分析风险并提出需要我批准的优化方案")}><Bot size={13}/>Agent 分析</button></div><div className="data-policy"><ShieldCheck/><span><strong>真实交易保持禁用</strong><small>Agent 只能分析和提出方案，不能向券商发送订单。</small></span></div></>}</div>;
 }
 
+function WalkForwardCard({returns,notify}:{returns:number[];notify:Notify}){
+  const [train,setTrain]=useState(252);const [test,setTest]=useState(63);const [cost,setCost]=useState(12);
+  const [result,setResult]=useState<WalkForwardResult|null>(null);const [busy,setBusy]=useState(false);
+  const run=async()=>{setBusy(true);try{const next=await runWalkForward({returns,lookbacks:[5,10,20,60],trainDays:train,testDays:test,costBps:cost});setResult(next);notify(`Walk-Forward 完成：${next.n_windows} 个滚动窗`)}catch(e){notify(e instanceof Error?e.message:"检验失败","error")}finally{setBusy(false)}};
+  const vals=result?.combined.equity_curve||[];const min=vals.length?Math.min(...vals):0;const max=vals.length?Math.max(...vals):1;const span=max-min||1;
+  return <div className="backtest-real card"><div><h2>Walk-Forward 滚动检验</h2><p>对上方导入的收益序列做滚动训练/测试：每窗在训练段(默认 252 日)选出样本内最优动量参数(网格 5/10/20/60 日)，再在紧随的测试段做样本外评估。样本外显著弱于样本内即过拟合信号。</p></div>
+    <label>训练窗(日)<input type="number" min="60" max="1250" value={train} onChange={e=>setTrain(Math.max(60,Math.min(1250,Number(e.target.value)||252)))}/></label>
+    <label>测试窗(日)<input type="number" min="10" max="250" value={test} onChange={e=>setTest(Math.max(10,Math.min(250,Number(e.target.value)||63)))}/></label>
+    <label>成本（bps）<input type="number" min="0" max="100" value={cost} onChange={e=>setCost(Math.max(0,Math.min(100,Number(e.target.value))||0))}/></label>
+    <button className="primary-btn" disabled={busy||returns.length<train+test} onClick={()=>void run()}>{busy?<RefreshCw className="spin"/>:<FlaskConical/>}运行 Walk-Forward</button>
+    {returns.length<train+test&&<p className="ens-empty">至少需要 {train+test} 行收益（当前 {returns.length} 行）。</p>}
+    {result&&<div className="factor-result">
+      <div className="result-real-grid">
+        <div className="card"><small>滚动窗数</small><strong>{result.n_windows}</strong></div>
+        <div className="card"><small>OOS 天数</small><strong>{result.oos_days}</strong></div>
+        <div className="card"><small>OOS 合并年化</small><strong className={result.combined.annual_return>0?"tone-up":"tone-down"}>{(result.combined.annual_return*100).toFixed(2)}%</strong></div>
+        <div className="card"><small>OOS 合并夏普</small><strong>{result.combined.sharpe.toFixed(2)}</strong></div>
+        <div className="card"><small>OOS 合并回撤</small><strong className="tone-down">{(result.combined.max_drawdown*100).toFixed(2)}%</strong></div>
+        <div className="card"><small>IS→OOS 夏普衰减</small><strong className={result.overfit_check.degradation<0.6?"tone-down":""}>{result.overfit_check.degradation.toFixed(2)}</strong></div>
+      </div>
+      {vals.length>1&&<svg viewBox={`0 0 520 100`} className="nav-chart"><polyline points={vals.map((v,i)=>`${(i/(vals.length-1))*520},${100-((v-min)/span)*100}`).join(" ")} fill="none" stroke="#2563eb" strokeWidth="1.6"/></svg>}
+      <p className="decay-line">样本内平均夏普 {result.overfit_check.mean_is_sharpe.toFixed(2)} → 样本外平均夏普 {result.overfit_check.mean_oos_sharpe.toFixed(2)} · 各窗 OOS 净值拼接为上方曲线</p>
+      <div className="layer-table">{result.windows.map((w,i)=><span key={i}><em>{w.train.start.slice(0,10)}→{w.test.end.slice(0,10)}</em><b className={w.oos_sharpe>0?"tone-up":"tone-down"}>OOS 夏普 {w.oos_sharpe.toFixed(2)}</b><small>选中 {w.params.lookback} 日动量 · IS {w.is_sharpe.toFixed(2)} · 回撤 {(w.oos_max_drawdown*100).toFixed(1)}%</small></span>)}</div>
+    </div>}
+  </div>;
+}
+
 function BacktestPage({status,onChanged,notify}:{status:WorkspaceStatus;onChanged:()=>void;notify:Notify}){
   const input=useRef<HTMLInputElement>(null);const [rows,setRows]=useState<Array<{ret:number;signal:number}>>([]);const [cost,setCost]=useState(12);const [result,setResult]=useState<Record<string,unknown>|null>(null);const [busy,setBusy]=useState(false);
   const importFile=async(file:File)=>{try{const text=await file.text();const lines=text.trim().split(/\r?\n/);const headers=lines.shift()?.split(",").map(x=>x.trim().toLowerCase())||[];const ri=headers.indexOf("return"),si=headers.indexOf("signal");if(ri<0||si<0)throw new Error("CSV 必须包含 return、signal 列");const parsed=lines.map(line=>{const c=line.split(",");return{ret:Number(c[ri]),signal:Number(c[si])}}).filter(x=>Number.isFinite(x.ret)&&Number.isFinite(x.signal));if(parsed.length<20)throw new Error("至少需要 20 行有效记录");setRows(parsed);setResult(null);notify(`已读取 ${parsed.length} 行回测输入`)}catch(e){notify(e instanceof Error?e.message:"读取失败","error")}};
   const run=async()=>{setBusy(true);try{const next=await runBacktest(rows.map(x=>x.ret),rows.map(x=>x.signal),cost);setResult(next);onChanged();notify("回测已完成")}catch(e){notify(e instanceof Error?e.message:"回测失败","error")}finally{setBusy(false)}};
-  return <div className="page-body v3-page"><input ref={input} hidden type="file" accept=".csv,text/csv" onChange={e=>{const file=e.target.files?.[0];if(file)void importFile(file)}}/><div className="backtest-real card"><div><h2>点时信号回测</h2><p>输入必须是你自己的真实收益和信号序列。引擎自动滞后一周期，并扣除换手成本。</p></div><button className="secondary-btn" onClick={()=>input.current?.click()}><FileUp size={13}/>{rows.length?"更换 CSV":"导入 CSV"}</button><label>成本（bps）<input type="number" min="0" max="100" value={cost} onChange={e=>setCost(Number(e.target.value))}/></label><button className="primary-btn" disabled={rows.length<20||busy} onClick={()=>void run()}>{busy?<RefreshCw className="spin"/>:<FlaskConical/>}运行回测</button></div><div className="input-status">{rows.length?`已加载 ${rows.length} 行真实记录`:`等待 CSV：return,signal`}</div>{result&&<div className="result-real-grid">{([["年化收益","annual_return"],["年化波动","annual_volatility"],["夏普比率","sharpe"],["最大回撤","max_drawdown"],["胜率","win_rate"],["年化换手","turnover"]] as [string,string][]).map(([label,key])=>{const v=typeof result[key]==="number"?Number(result[key]):undefined;const tone=key==="annual_return"?(v??0)>0?"tone-up":(v??0)<0?"tone-down":"":key==="max_drawdown"?"tone-down":"";return <div className="card" key={key}><small>{label}</small><strong className={tone}>{v!==undefined?(v*(key==="sharpe"?1:100)).toFixed(2)+(key==="sharpe"?"":"%"):"—"}</strong></div>})}</div>}<FactorResearchCard status={status}/><PortfolioBacktestCard status={status}/></div>;
+  return <div className="page-body v3-page"><input ref={input} hidden type="file" accept=".csv,text/csv" onChange={e=>{const file=e.target.files?.[0];if(file)void importFile(file)}}/><div className="backtest-real card"><div><h2>点时信号回测</h2><p>输入必须是你自己的真实收益和信号序列。引擎自动滞后一周期，并扣除换手成本。</p></div><button className="secondary-btn" onClick={()=>input.current?.click()}><FileUp size={13}/>{rows.length?"更换 CSV":"导入 CSV"}</button><label>成本（bps）<input type="number" min="0" max="100" value={cost} onChange={e=>setCost(Number(e.target.value))}/></label><button className="primary-btn" disabled={rows.length<20||busy} onClick={()=>void run()}>{busy?<RefreshCw className="spin"/>:<FlaskConical/>}运行回测</button></div><div className="input-status">{rows.length?`已加载 ${rows.length} 行真实记录`:`等待 CSV：return,signal`}</div>{result&&<div className="result-real-grid">{([["年化收益","annual_return"],["年化波动","annual_volatility"],["夏普比率","sharpe"],["最大回撤","max_drawdown"],["胜率","win_rate"],["年化换手","turnover"]] as [string,string][]).map(([label,key])=>{const v=typeof result[key]==="number"?Number(result[key]):undefined;const tone=key==="annual_return"?(v??0)>0?"tone-up":(v??0)<0?"tone-down":"":key==="max_drawdown"?"tone-down":"";return <div className="card" key={key}><small>{label}</small><strong className={tone}>{v!==undefined?(v*(key==="sharpe"?1:100)).toFixed(2)+(key==="sharpe"?"":"%"):"—"}</strong></div>})}</div>}<WalkForwardCard returns={rows.map(x=>x.ret)} notify={notify}/><FactorResearchCard status={status}/><PortfolioBacktestCard status={status}/></div>;
 }
 
 function RiskPage({status,launchAgent,onNavigate}:{status:WorkspaceStatus;launchAgent:(p:string)=>void;onNavigate:(p:PageId)=>void}){return <div className="page-body v3-page">{status.holding_count===0?<EmptyState icon={ShieldCheck} title="无法计算组合风险" description="风险引擎需要真实持仓，以及这些标的至少 21 个交易日的价格历史。" action={()=>onNavigate("portfolio")} actionLabel="先导入持仓"/>:status.market_rows===0?<EmptyState icon={Database} title="缺少价格历史" description="已检测到持仓，但还没有市场价格。导入价格数据后才能计算 VaR、CVaR 与回撤。" action={()=>onNavigate("data")} actionLabel="导入市场数据"/>:<div className="real-ready card"><ShieldCheck/><div><h2>风险计算条件已满足</h2><p>{status.holding_count} 个持仓，{status.market_rows.toLocaleString()} 行价格记录。让 Agent 调用风险工具并解释结果。</p></div><button className="primary-btn" onClick={()=>launchAgent("基于我的真实持仓和导入的价格历史计算 VaR、CVaR、最大回撤，并解释主要风险来源")}><Bot size={13}/>运行风险 Agent</button></div>}</div>}
@@ -425,7 +584,7 @@ function LegacySettingsPage({theme,setTheme,onApiKey,status,model,setModel,notif
   return <div className="page-body settings-page fade-in"><aside className="settings-nav">{[["general","通用"],["agent","Agent 与模型"],["safety","安全边界"],["notifications","通知"]].map(([id,label])=><button key={id} className={section===id?"active":""} onClick={()=>setSection(id)}>{label}</button>)}</aside><div className="settings-content">
     {section==="general"&&<><section><h2>外观</h2><p>选择应用主题。</p><div className="theme-options"><button className={theme==="light"?"active":""} onClick={()=>setTheme("light")}><span className="theme-preview light-preview"><i/><i/><i/></span><CheckCircle2/>浅色</button><button className={theme==="dark"?"active":""} onClick={()=>setTheme("dark")}><span className="theme-preview dark-preview"><i/><i/><i/></span><CheckCircle2/>深色</button></div></section><section><h2>启动</h2><div className="settings-row"><span><strong>启动时运行 Agent 引擎</strong><small>控制下一次桌面应用启动时是否自动加载本地引擎</small></span><button className={`toggle ${autostart?"on":""}`} onClick={()=>toggle("quant-autostart",!autostart,setAutostart)}><i/></button></div></section></>}
     {section==="agent"&&<><section><h2>模型 API</h2><p>各提供商密钥独立加密保存在 Windows Credential Manager。</p><div className="provider-key-list"><div className="settings-row"><span><strong>OpenAI</strong><small>{status.agent_configured?"已连接":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("OpenAI")}><KeyRound size={13}/>配置</button></div><div className="settings-row"><span><strong>DeepSeek</strong><small>{status.deepseek_configured?"已连接":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("DeepSeek")}><KeyRound size={13}/>配置</button></div><div className="settings-row"><span><strong>Qwen / 阿里云百炼</strong><small>{status.qwen_configured?"已连接":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("Qwen")}><KeyRound size={13}/>配置</button></div></div></section><section><h2>行情数据 API</h2><p>行情凭据独立保存，不会发送给模型提供商。</p><div className="provider-key-list"><div className="settings-row"><span><strong>Alpha Vantage</strong><small>{status.market_provider_configured?"已连接，全球股票与外汇日线":"尚未配置"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("AlphaVantage")}><KeyRound size={13}/>配置</button></div><div className="settings-row"><span><strong>Tushare Pro</strong><small>{status.tushare_configured?"已连接，A 股与国内期货日线":"尚未配置；期货接口需要相应积分权限"}</small></span><button className="secondary-btn" onClick={()=>onApiKey("Tushare")}><KeyRound size={13}/>配置</button></div></div></section><section><h2>默认模型</h2><label className="real-select">Agent 模型<select value={model} onChange={e=>{setModel(e.target.value);localStorage.setItem("quant-model",e.target.value);notify("模型已切换")}}><optgroup label="OpenAI"><option value="gpt-5.4-mini">gpt-5.4-mini</option><option value="gpt-5.5">gpt-5.5</option></optgroup><optgroup label="DeepSeek"><option value="deepseek-v4-flash">DeepSeek V4 Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro</option></optgroup><optgroup label="Qwen"><option value="qwen3.7-flash">Qwen 3.7 Flash</option><option value="qwen3.7-plus">Qwen 3.7 Plus</option><option value="qwen3.8-max">Qwen 3.8 Max</option></optgroup></select></label></section></>}
-    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><AlertTriangle/>真实券商仅在 OMS 页面手动操作，默认模拟且真实模式需会话解锁</div><div><X/>Agent 无法读取已保存密钥的明文，也没有真实下单工具</div></div></section>}
+    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><AlertTriangle/>真实券商仅在 OMS 页面手动操作，默认模拟且真实模式需会话解锁</div><div><X/>Agent 无法读取已保存密钥的明文，也没有真实下单工具</div></div><PairingSettings notify={notify}/><TotpSettings notify={notify}/></section>}
     {section==="notifications"&&<section><h2>通知</h2><div className="settings-row"><span><strong>任务完成通知</strong><small>Agent 完成或失败时在应用内提示</small></span><button className={`toggle ${notifications?"on":""}`} onClick={()=>toggle("quant-notifications",!notifications,setNotifications)}><i/></button></div></section>}
   </div></div>;
 }
@@ -470,14 +629,95 @@ function SettingsPage({theme,setTheme,onApiKey,status,model,setModel,notify,onOp
       <section><h2>浏览器</h2><p>浏览器面板打开时默认加载的地址，留空使用必应。</p><input className="settings-text" type="text" value={browserHome} onChange={e=>setBrowserHome(e.target.value)} onBlur={applyBrowserHome} placeholder="https://www.bing.com"/><div className="settings-row"><span><strong>恢复默认主页</strong><small>清除自定义主页，回到必应</small></span><button className="secondary-btn" onClick={()=>{setBrowserHome("");localStorage.removeItem("quant-browser-home");notify("已恢复默认主页")}}>恢复默认</button></div></section>
     </>}
     {section==="agent"&&<>
-      <section><h2>模型 API</h2><p>密钥独立加密保存在 Windows Credential Manager。</p><div className="provider-key-list">{(["OpenAI","DeepSeek","Qwen"] as ApiProvider[]).map(provider=><div className="settings-row" key={provider}><span><strong>{provider==="Qwen"?"Qwen / 阿里云百炼":provider}</strong><small>{provider==="OpenAI"?status.agent_configured?"已连接":"尚未配置":provider==="DeepSeek"?status.deepseek_configured?"已连接":"尚未配置":status.qwen_configured?"已连接":"尚未配置"}</small></span><button className="provider-link" title={`前往 ${provider==="Qwen"?"阿里云百炼":provider} 官网申请 Key`} onClick={()=>onOpenExternal(PROVIDER_URLS[provider])}><ExternalLink size={12}/>官网</button><button className="secondary-btn" onClick={()=>onApiKey(provider)}><KeyRound size={13}/>配置</button></div>)}</div></section>
-      <section><h2>行情数据 API</h2><p>行情凭据不会发送给模型提供商。</p><div className="provider-key-list"><div className="settings-row"><span><strong>Alpha Vantage</strong><small>{status.market_provider_configured?"已连接，全球股票与外汇":"尚未配置"}</small></span><button className="provider-link" title="前往 Alpha Vantage 申请免费 Key" onClick={()=>onOpenExternal(PROVIDER_URLS.AlphaVantage)}><ExternalLink size={12}/>官网</button><button className="secondary-btn" onClick={()=>onApiKey("AlphaVantage")}><KeyRound size={13}/>配置</button></div><div className="settings-row"><span><strong>Tushare Pro</strong><small>{status.tushare_configured?"已连接，A 股与国内期货":"尚未配置"}</small></span><button className="provider-link" title="前往 Tushare Pro 注册" onClick={()=>onOpenExternal(PROVIDER_URLS.Tushare)}><ExternalLink size={12}/>官网</button><button className="secondary-btn" onClick={()=>onApiKey("Tushare")}><KeyRound size={13}/>配置</button></div></div></section>
-      <section><h2>模型与行为</h2><div className="settings-choice-grid"><label className="real-select">默认模型<select value={model} onChange={event=>{setModel(event.target.value);localStorage.setItem("quant-model",event.target.value);notify("模型已切换")}}><optgroup label="OpenAI"><option value="gpt-5.4-mini">gpt-5.4-mini</option><option value="gpt-5.5">gpt-5.5</option></optgroup><optgroup label="DeepSeek"><option value="deepseek-v4-flash">DeepSeek V4 Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro</option></optgroup><optgroup label="Qwen"><option value="qwen3.7-flash">Qwen 3.7 Flash</option><option value="qwen3.7-plus">Qwen 3.7 Plus</option><option value="qwen3.8-max">Qwen 3.8 Max</option></optgroup></select></label><label className="real-select">回答详略<select value={verbosity} onChange={event=>saveChoice("quant-verbosity",event.target.value,setVerbosity)}><option value="concise">简洁</option><option value="balanced">平衡</option><option value="detailed">详细</option></select></label><label className="real-select">表达风格<select value={personality} onChange={event=>saveChoice("quant-personality",event.target.value,setPersonality)}><option value="professional">专业审慎</option><option value="direct">直接务实</option><option value="teaching">教学解释</option></select></label></div><label className="real-select" style={{marginTop:10}}>默认权限<select value={defaultAccess} onChange={event=>{const value=event.target.value as AccessMode;setDefaultAccess(value);localStorage.setItem("quant-access-mode",value);notify("默认权限已更新")}}><option value="ask">只读提案</option><option value="approve">待批准提案</option><option value="full">完全访问</option></select></label>{defaultAccess==="full"&&<small className="access-full-hint">完全访问可执行受控本地写操作，仍不能真实下单</small>}<div className="settings-row"><span><strong>显示建议任务</strong><small>在新任务页显示基于工作区的快捷提示</small></span><button className={`toggle ${suggestions?"on":""}`} onClick={()=>toggle("quant-suggestions",!suggestions,setSuggestions)}><i/></button></div></section>
+      <section><h2>模型 API</h2><p>密钥独立加密保存在 Windows Credential Manager。模型切换请到对话界面左下角，这里只管理密钥。</p><div className="provider-key-list">{(["OpenAI","DeepSeek","Qwen","OpenRouter"] as ApiProvider[]).map(provider=>{const configured=provider==="OpenAI"?status.agent_configured:provider==="DeepSeek"?status.deepseek_configured:provider==="Qwen"?status.qwen_configured:status.openrouter_configured;const isDefault=(provider==="OpenAI"&&!model.includes("/")&&!model.startsWith("deepseek-")&&!model.startsWith("qwen")&&model!=="auto")||(provider==="DeepSeek"&&model.startsWith("deepseek-"))||(provider==="Qwen"&&model.startsWith("qwen"))||(provider==="OpenRouter"&&(model.includes("/")||model==="auto"));return <div className={`provider-card ${isDefault?"active":""}`} key={provider}><div className="provider-card-head"><span><strong>{provider==="Qwen"?"Qwen / 阿里云百炼":provider}</strong><small>{configured?"已连接":"尚未配置"}{isDefault?" · 当前默认":""}</small></span><button className="provider-link" title={`前往 ${provider==="Qwen"?"阿里云百炼":provider} 官网申请 Key`} onClick={()=>onOpenExternal(PROVIDER_URLS[provider])}><ExternalLink size={12}/>官网</button><button className="secondary-btn" onClick={()=>onApiKey(provider)}><KeyRound size={13}/>配置</button></div></div>})}</div></section>
+      <section><h2>行情数据 API</h2><p>行情凭据不会发送给模型提供商。</p><div className="provider-key-list"><div className="provider-card"><div className="provider-card-head"><span><strong>Alpha Vantage</strong><small>{status.market_provider_configured?"已连接，全球股票与外汇":"尚未配置"}</small></span><button className="provider-link" title="前往 Alpha Vantage 申请免费 Key" onClick={()=>onOpenExternal(PROVIDER_URLS.AlphaVantage)}><ExternalLink size={12}/>官网</button><button className="secondary-btn" onClick={()=>onApiKey("AlphaVantage")}><KeyRound size={13}/>配置</button></div></div><div className="provider-card"><div className="provider-card-head"><span><strong>Tushare Pro</strong><small>{status.tushare_configured?"已连接，A 股与国内期货":"尚未配置"}</small></span><button className="provider-link" title="前往 Tushare Pro 注册" onClick={()=>onOpenExternal(PROVIDER_URLS.Tushare)}><ExternalLink size={12}/>官网</button><button className="secondary-btn" onClick={()=>onApiKey("Tushare")}><KeyRound size={13}/>配置</button></div></div></div></section>
+      <section><h2>回答行为</h2><div className="settings-choice-grid"><label className="real-select">回答详略<select value={verbosity} onChange={event=>saveChoice("quant-verbosity",event.target.value,setVerbosity)}><option value="concise">简洁</option><option value="balanced">平衡</option><option value="detailed">详细</option></select></label><label className="real-select">表达风格<select value={personality} onChange={event=>saveChoice("quant-personality",event.target.value,setPersonality)}><option value="professional">专业审慎</option><option value="direct">直接务实</option><option value="teaching">教学解释</option></select></label></div><label className="real-select" style={{marginTop:10}}>默认权限<select value={defaultAccess} onChange={event=>{const value=event.target.value as AccessMode;setDefaultAccess(value);localStorage.setItem("quant-access-mode",value);notify("默认权限已更新")}}><option value="ask">只读提案</option><option value="approve">待批准提案</option><option value="full">完全访问</option></select></label>{defaultAccess==="full"&&<small className="access-full-hint">完全访问可执行受控本地写操作，仍不能真实下单</small>}<div className="settings-row"><span><strong>显示建议任务</strong><small>在新任务页显示基于工作区的快捷提示</small></span><button className={`toggle ${suggestions?"on":""}`} onClick={()=>toggle("quant-suggestions",!suggestions,setSuggestions)}><i/></button></div></section>
       <section><h2>自定义指令</h2><p>每次任务都会附加到 Agent 上下文；不要在此填写 API Key。</p><textarea className="settings-textarea" value={customInstructions} onChange={event=>setCustomInstructions(event.target.value)} onBlur={()=>{localStorage.setItem("quant-custom-instructions",customInstructions);notify("自定义指令已保存")}} placeholder="例如：默认使用人民币计价；所有建议必须列出数据日期与主要风险。"/></section>
     </>}
-    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><AlertTriangle/>真实券商仅在 OMS 页面手动操作，默认模拟且真实模式需会话解锁</div><div><X/>Agent 无法读取已保存密钥的明文，也没有真实下单工具</div></div></section>}
-    {section==="notifications"&&<section><h2>通知</h2><div className="settings-row"><span><strong>任务完成通知</strong><small>Agent 完成或失败时在应用内提示</small></span><button className={`toggle ${notifications?"on":""}`} onClick={()=>toggle("quant-notifications",!notifications,setNotifications)}><i/></button></div><div className="settings-row"><span><strong>系统通知</strong><small>预警触发与任务完成时弹出 Windows 通知</small></span><button className="secondary-btn" onClick={()=>{if("Notification" in window)void Notification.requestPermission().then(p=>notify(p==="granted"?"已允许系统通知":"系统通知被拒绝","ok"))}}>申请权限</button></div><label className="real-select" style={{marginTop:10}}>Webhook 推送<input className="settings-text" type="text" value={webhookUrl} onChange={e=>setWebhookUrl(e.target.value)} placeholder="https://example.com/hook（留空关闭）"/></label><button className="secondary-btn" style={{marginTop:8}} onClick={()=>{setWebhook(webhookUrl.trim()).then(()=>notify("Webhook 已保存")).catch((e:unknown)=>notify(e instanceof Error?e.message:"保存失败","error"))}}><Check size={13}/>保存 Webhook</button></section>}
+    {section==="safety"&&<section><h2>不可绕过的安全边界</h2><p>这些限制由本地 Agent 指令和工具层共同执行。</p><div className="safety-list"><div><Check/>读取本地数据和运行研究工具</div><div><AlertTriangle/>修改组合必须获得明确批准</div><div><AlertTriangle/>真实券商仅在 OMS 页面手动操作，默认模拟且真实模式需会话解锁</div><div><X/>Agent 无法读取已保存密钥的明文，也没有真实下单工具</div></div><PairingSettings notify={notify}/><TotpSettings notify={notify}/></section>}
+    {section==="notifications"&&<section><h2>通知</h2><div className="settings-row"><span><strong>任务完成通知</strong><small>Agent 完成或失败时在应用内提示</small></span><button className={`toggle ${notifications?"on":""}`} onClick={()=>toggle("quant-notifications",!notifications,setNotifications)}><i/></button></div><div className="settings-row"><span><strong>系统通知</strong><small>预警触发与任务完成时弹出 Windows 通知</small></span><button className="secondary-btn" onClick={()=>{if("Notification" in window)void Notification.requestPermission().then(p=>notify(p==="granted"?"已允许系统通知":"系统通知被拒绝","ok"))}}>申请权限</button></div><label className="real-select" style={{marginTop:10}}>Webhook 推送<input className="settings-text" type="text" value={webhookUrl} onChange={e=>setWebhookUrl(e.target.value)} placeholder="https://example.com/hook（留空关闭）"/></label><button className="secondary-btn" style={{marginTop:8}} onClick={()=>{setWebhook(webhookUrl.trim()).then(()=>notify("Webhook 已保存")).catch((e:unknown)=>notify(e instanceof Error?e.message:"保存失败","error"))}}><Check size={13}/>保存 Webhook</button><PushSettings notify={notify}/></section>}
   </div></div>;
+}
+
+// Web Push 订阅设置（设置 → 通知）：把 Agent 任务结果与预警推到系统通知（含手机浏览器）
+function PushSettings({notify}:{notify:Notify}){
+  const [on,setOn]=useState(()=>pushEnabledFlag());
+  const [busy,setBusy]=useState(false);
+  const supported=pushSupported();
+  const toggle=async()=>{
+    if(busy)return;
+    setBusy(true);
+    try{
+      if(on){
+        await disablePush(pushUnsubscribe);
+        setOn(false);notify("Web Push 已关闭");
+      }else{
+        const res=await enablePush(getPushPublicKey,sub=>pushSubscribe({endpoint:sub.endpoint,keys:sub.keys,userAgent:navigator.userAgent.slice(0,290)}));
+        if(res.ok){setOn(true);notify("Web Push 已开启")}
+        else notify(res.error||"开启失败","error");
+      }
+    }catch(e){notify(e instanceof Error?e.message:"推送设置失败","error")}finally{setBusy(false)}
+  };
+  const test=()=>{pushTest().then(()=>notify("测试通知已发送")).catch((e:unknown)=>notify(e instanceof Error?e.message:"测试发送失败","error"))};
+  return <div className="settings-row" style={{marginTop:10}}><span><strong>Web Push 浏览器推送</strong><small>{on?"已订阅，预警/定时任务结果将推送系统通知":supported?"订阅后预警与定时任务结果会推送到本机与已连接的浏览器":"当前环境不支持 Web Push"}</small></span><div style={{display:"flex",gap:8}}><button className="secondary-btn" onClick={()=>void toggle()} disabled={busy||!supported}>{busy?<RefreshCw className="spin"/>:on?"关闭":"订阅"}</button>{on&&<button className="secondary-btn" onClick={test}><Zap size={12}/>测试</button>}</div></div>;
+}
+
+// 移动端配对码（设置 → 安全边界）：桌面端生成 6 位一次性配对码，
+// 手机端在「设置 → 引擎连接」输入即可换取访问令牌，90 秒内有效。
+function PairingSettings({notify}:{notify:Notify}){
+  const [code,setCode]=useState("");
+  const [expireAt,setExpireAt]=useState(0);
+  const [left,setLeft]=useState(0);
+  const [busy,setBusy]=useState(false);
+  useEffect(()=>{
+    if(!expireAt)return;
+    const timer=window.setInterval(()=>{
+      const rest=Math.max(0,Math.ceil((expireAt-Date.now())/1000));
+      setLeft(rest);
+      if(rest<=0)window.clearInterval(timer);
+    },250);
+    return ()=>window.clearInterval(timer);
+  },[expireAt]);
+  const create=async()=>{
+    setBusy(true);
+    try{
+      const r=await engineFetch("/pair/create",{method:"POST"});
+      const data=await r.json() as {ok?:boolean;code?:string;expires_in?:number;detail?:string};
+      if(!r.ok||!data.ok){notify(data.detail||"生成配对码失败","error");return}
+      setCode(data.code||"");setExpireAt(Date.now()+(data.expires_in||90)*1000);setLeft(data.expires_in||90);
+      notify("配对码已生成，90 秒内在手机端输入");
+    }catch(e){notify(e instanceof Error?e.message:"生成配对码失败","error")}finally{setBusy(false)}
+  };
+  return <div style={{marginTop:14}}>
+    <div className="settings-row"><span><strong>移动端配对</strong><small>手机端「设置 → 引擎连接」输入配对码即可自动完成连接授权（一次性，90 秒有效）</small></span><button className="secondary-btn" disabled={busy} onClick={()=>void create()}>{busy?<RefreshCw className="spin"/>:<Copy size={13}/>}生成配对码</button></div>
+    {code&&left>0&&<div className="pair-code-box"><code>{code}</code><em>{left}s 后失效</em></div>}
+  </div>;
+}
+
+function TotpSettings({notify}:{notify:Notify}){
+  const [secret,setSecret]=useState("");
+  const [url,setUrl]=useState("");
+  const [code,setCode]=useState("");
+  const [busy,setBusy]=useState(false);
+  const setup=async()=>{
+    setBusy(true);
+    try{
+      const r=await totpSetup();
+      setSecret(r.secret);setUrl(r.otpauth_url);notify("请用验证器扫描密钥，再输入 6 位码确认");
+    }catch(e){notify(e instanceof Error?e.message:"无法开始两步验证","error")}
+    finally{setBusy(false)}
+  };
+  const confirm=async()=>{
+    setBusy(true);
+    try{await totpConfirm(code);notify("两步验证已开启","ok");setCode("")}
+    catch(e){notify(e instanceof Error?e.message:"验证失败","error")}
+    finally{setBusy(false)}
+  };
+  return <div style={{marginTop:14}}>
+    <div className="settings-row"><span><strong>两步验证 (TOTP)</strong><small>登录时额外输入验证器 6 位码。进程令牌桌面端仍可在未登录时访问本机引擎。</small></span><button className="secondary-btn" disabled={busy} onClick={()=>void setup()}>{busy?<RefreshCw className="spin"/>:<KeyRound size={13}/>}生成密钥</button></div>
+    {secret&&<p className="settings-help">密钥 <code>{secret}</code>{url?<> · <a href={url}>otpauth</a></>:null}</p>}
+    {secret&&<div className="settings-row"><input className="settings-text" value={code} onChange={e=>setCode(e.target.value)} placeholder="输入 6 位验证码" maxLength={12}/><button className="primary-btn" disabled={busy||code.length<6} onClick={()=>void confirm()}>确认开启</button></div>}
+  </div>;
 }
 
 function KeyModal({provider,onClose,onSaved,notify,onOpenExternal}:{provider:ApiProvider;onClose:()=>void;onSaved:(provider:ApiProvider)=>void;notify:Notify;onOpenExternal:(url:string)=>void}){
@@ -485,7 +725,7 @@ function KeyModal({provider,onClose,onSaved,notify,onOpenExternal}:{provider:Api
   const [show,setShow]=useState(false);
   const [busy,setBusy]=useState(false);
   const [saved,setSaved]=useState(false);
-  const names:Record<ApiProvider,string>={OpenAI:"OpenAI",DeepSeek:"DeepSeek",Qwen:"Qwen / 阿里云百炼",AlphaVantage:"Alpha Vantage",Tushare:"Tushare Pro"};
+  const names:Record<ApiProvider,string>={OpenAI:"OpenAI",DeepSeek:"DeepSeek",Qwen:"Qwen / 阿里云百炼",OpenRouter:"OpenRouter",AlphaVantage:"Alpha Vantage",Tushare:"Tushare Pro"};
   const isMarket=provider==="AlphaVantage"||provider==="Tushare";
   useEffect(()=>{void hasApiKey(provider).then(setSaved).catch(()=>undefined)},[provider]);
   const save=async()=>{if(key.trim().length<8){notify("请输入有效的 API Key 或 Token","error");return}setBusy(true);try{await saveApiKey(provider,key.trim());await configureEngine(provider);onSaved(provider);notify(`${names[provider]} 凭据已保存并连接`);onClose()}catch(e){notify(e instanceof Error?e.message:"配置失败","error")}finally{setBusy(false)}};
@@ -772,9 +1012,10 @@ function TasksPage({tasks,setTasks,model,status,runTask,notify}:{tasks:Scheduled
   const [hour,setHour]=useState(9);const [minute,setMinute]=useState(0);const [intervalMinutes,setIntervalMinutes]=useState(60);
   const [weekdays,setWeekdays]=useState<number[]>([1,2,3,4,5]);
   const [taskModel,setTaskModel]=useState("");
+  const [tradingDaysOnly,setTradingDaysOnly]=useState(false);
   const addTask=()=>{
     if(!prompt.trim()){notify("请填写任务内容","error");return}
-    const task:ScheduledTask={id:`t${Date.now()}_${Math.random().toString(36).slice(2,7)}`,name:name.trim()||prompt.trim().slice(0,24),prompt:prompt.trim(),frequency,hour,minute,intervalMinutes,weekdays:frequency==="weekly"?weekdays:undefined,model:taskModel||undefined,enabled:true,createdAt:Date.now(),history:[]};
+    const task:ScheduledTask={id:`t${Date.now()}_${Math.random().toString(36).slice(2,7)}`,name:name.trim()||prompt.trim().slice(0,24),prompt:prompt.trim(),frequency,hour,minute,intervalMinutes,weekdays:frequency==="weekly"?weekdays:undefined,model:taskModel||undefined,enabled:true,tradingDaysOnly:frequency!=="once"?tradingDaysOnly:undefined,createdAt:Date.now(),history:[]};
     const next=[...tasks,task];void saveTasks(next);setTasks(next);setShowForm(false);setName("");setPrompt("");setTaskModel("");notify("定时任务已创建");
   };
   const toggleTask=(task:ScheduledTask)=>{const next=tasks.map(t=>t.id===task.id?{...t,enabled:!t.enabled}:t);void saveTasks(next);setTasks(next)};
@@ -792,7 +1033,8 @@ function TasksPage({tasks,setTasks,model,status,runTask,notify}:{tasks:Scheduled
         {frequency==="interval"?<label>间隔分钟数<input type="number" min="1" max="10080" value={intervalMinutes} onChange={e=>setIntervalMinutes(Math.max(1,Number(e.target.value)||60))}/></label>:<label>时间<input type="time" value={`${String(hour).padStart(2,"0")}:${String(minute).padStart(2,"0")}`} onChange={e=>{const [h,m]=e.target.value.split(":").map(Number);setHour(Number.isFinite(h)?h:9);setMinute(Number.isFinite(m)?m:0)}}/></label>}
       </div>
       {frequency==="weekly"&&<div className="weekday-row">{WEEKDAY_LABELS.map((label,index)=><button key={index} className={weekdays.includes(index)?"active":""} onClick={()=>setWeekdays(prev=>prev.includes(index)?prev.filter(w=>w!==index):[...prev,index].sort())}>{label}</button>)}</div>}
-      <label>模型（留空用默认）<select value={taskModel} onChange={e=>setTaskModel(e.target.value)}><option value="">默认（{model}）</option><optgroup label="OpenAI"><option value="gpt-5.4-mini">gpt-5.4-mini</option><option value="gpt-5.5">gpt-5.5</option></optgroup><optgroup label="DeepSeek"><option value="deepseek-v4-flash">DeepSeek V4 Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro</option></optgroup><optgroup label="Qwen"><option value="qwen3.7-flash">Qwen 3.7 Flash</option><option value="qwen3.7-plus">Qwen 3.7 Plus</option><option value="qwen3.8-max">Qwen 3.8 Max</option></optgroup></select></label>
+      {frequency!=="once"&&<label className="task-trading-days"><input type="checkbox" checked={tradingDaysOnly} onChange={e=>setTradingDaysOnly(e.target.checked)}/>仅交易日运行（周末与节假日跳过）</label>}
+      <label>模型（留空用默认）<select value={taskModel} onChange={e=>setTaskModel(e.target.value)}><option value="">默认（{model}）</option><optgroup label="OpenAI"><option value="gpt-5.4-mini">gpt-5.4-mini</option><option value="gpt-5.5">gpt-5.5</option></optgroup><optgroup label="DeepSeek"><option value="deepseek-v4-flash">DeepSeek V4 Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro</option></optgroup><optgroup label="Qwen"><option value="qwen3.7-flash">Qwen 3.7 Flash</option><option value="qwen3.7-plus">Qwen 3.7 Plus</option><option value="qwen3.8-max">Qwen 3.8 Max</option></optgroup><optgroup label="OpenRouter"><option value="anthropic/claude-opus-4.7">Claude Opus 4.7</option><option value="openai/gpt-5.4">GPT-5.4</option><option value="google/gemini-3.1-pro">Gemini 3.1 Pro</option><option value="x-ai/grok-4">Grok 4</option></optgroup></select></label>
       <div className="task-form-actions"><button className="secondary-btn" onClick={()=>setShowForm(false)}>取消</button><button className="primary-btn" onClick={addTask}><Plus size={13}/>创建</button></div>
     </div>}
     {tasks.length===0?<div className="real-empty"><span><CalendarClock/></span><h2>还没有定时任务</h2><p>设置一个周期任务，QuantDesk 会在到点时自动运行 Agent 并把结果记录在这里。任务保存在本机，重启后继续生效。</p><button className="primary-btn" onClick={()=>setShowForm(true)}><Plus size={13}/>新建定时任务</button></div>:
@@ -976,7 +1218,7 @@ export default function App(){
     }catch{return false}
   };
   const restoreStoredCredentials=async()=>{
-    const providers:ApiProvider[]=["OpenAI","DeepSeek","Qwen","AlphaVantage","Tushare"];
+    const providers:ApiProvider[]=["OpenAI","DeepSeek","Qwen","OpenRouter","AlphaVantage","Tushare"];
     const stored=(await Promise.all(providers.map(async provider=>({provider,stored:await hasApiKey(provider).catch(()=>false)})))).filter(item=>item.stored);
     await Promise.allSettled(stored.map(item=>configureEngine(item.provider)));
     const brokers:BrokerId[]=["alpaca","ibkr"];
@@ -1010,10 +1252,9 @@ export default function App(){
   useEffect(()=>{localStorage.setItem("quant-ctx-collapsed",ctxCollapsed?"1":"0")},[ctxCollapsed]);
   useEffect(()=>{localStorage.setItem("quant-sidebar-w",String(sidebarW))},[sidebarW]);
   useEffect(()=>{document.documentElement.dataset.tone=localStorage.getItem("quant-tone")||"cn";document.documentElement.dataset.pointer=localStorage.getItem("quant-pointer")!=="0"?"1":"0";if(localStorage.getItem("quant-always-on-top")==="1")void getCurrentWindow().setAlwaysOnTop(true).catch(()=>undefined);applyFontScale(Number(localStorage.getItem("quant-font-scale"))||1)},[]);
-  useEffect(()=>{void (async()=>{
-    // 凭据恢复必须无条件执行：autostart 只决定是否拉起引擎，
-    // 不能因为引擎端口被占用（startEngine reject）就跳过恢复，否则每次重启都要重新配置 Key。
-    if(localStorage.getItem("quant-autostart")!=="0"){try{await startEngine()}catch{/* engine may already be running or unavailable; restore still proceeds */}}
+  // 账户门控：checking=探测中 gate=显示登录/注册 ready=已登录进入工作区
+  const [auth,setAuth]=useState<{phase:"checking"|"gate"|"ready";mode:"login"|"register";user:string|null;note:string}>({phase:"checking",mode:"login",user:null,note:""});
+  const bootWorkspace=async()=>{
     for(let i=0;i<20;i++){
       try{await getWorkspaceStatus();await restoreStoredCredentials();break}
       catch{await new Promise(r=>setTimeout(r,400))}
@@ -1022,7 +1263,54 @@ export default function App(){
     await syncThreadsFromServer();
     window.dispatchEvent(new Event("quant-threads-updated"));
     if("Notification" in window&&Notification.permission==="default")void Notification.requestPermission().catch(()=>undefined);
+  };
+  useEffect(()=>{void (async()=>{
+    // 凭据恢复必须无条件执行：autostart 只决定是否拉起引擎，
+    // 不能因为引擎端口被占用（startEngine reject）就跳过恢复，否则每次重启都要重新配置 Key。
+    let engineNote="";
+    if(localStorage.getItem("quant-autostart")!=="0"){try{await startEngine()}catch(e){engineNote=String(e)}}
+    // 引擎就绪后先探测账户状态：未初始化→注册首个管理员；已初始化未登录→登录页
+    // 冻结引擎（onefile）首次启动需解压约 20-40 秒，探测窗口必须足够长
+    let probe:AuthStatus|null=null;
+    for(let i=0;i<90;i++){
+      try{probe=await getAuthStatus();break}
+      catch{await new Promise(r=>setTimeout(r,500))}
+    }
+    if(!probe){
+      // 兜底：显式再拉起一次引擎（覆盖 autostart 被关闭但用户期望可用的场景），再探测 30 秒
+      try{await startEngine()}catch(e){engineNote=engineNote||String(e)}
+      for(let i=0;i<60;i++){
+        try{probe=await getAuthStatus();break}
+        catch{await new Promise(r=>setTimeout(r,500))}
+      }
+    }
+    if(!probe){setAuth({phase:"gate",mode:"login",user:null,note:`本地引擎未就绪${engineNote?`：${engineNote}`:"，请重启应用后重试"}`});return}
+    if(!probe.initialized){setAuth({phase:"gate",mode:"register",user:null,note:""});return}
+    if(!probe.authenticated){setAuth({phase:"gate",mode:"login",user:null,note:""});return}
+    setAuth({phase:"ready",mode:"login",user:probe.user?.username??null,note:""});
+    await bootWorkspace();
   })()},[]);
+  // 任何接口在令牌重试后仍 401（会话过期）→ 回到登录页
+  useEffect(()=>onUnauthorized(()=>{
+    setAuth(a=>a.phase==="ready"?{...a,phase:"gate",mode:"login",user:null,note:"登录会话已失效，请重新登录"}:a);
+  }),[]);
+  // 引擎进程意外退出时给出明确提示（后端监控线程发出），不再让用户面对无法解释的连接错误
+  useEffect(()=>{
+    let unlisten:(()=>void)|null=null;
+    void listen<{code:number|null}>("engine-exited",event=>{
+      const code=event.payload?.code;
+      notify(`本地引擎已退出${code!==null&&code!==undefined?`（退出码 ${code}）`:""}，请重启应用`, "error");
+    }).then(fn=>{unlisten=fn}).catch(()=>undefined);
+    return()=>{unlisten?.()};
+  },[]);
+  const handleAuthed=(username:string)=>{
+    setAuth({phase:"ready",mode:"login",user:username,note:""});
+    void bootWorkspace();
+  };
+  const handleLogout=async()=>{
+    await authLogout();
+    setAuth(a=>({...a,phase:"gate",mode:"login",user:null,note:"已退出登录"}));
+  };
   // 定时任务的到点触发已迁到引擎后台调度循环, 前端轮询只做展示刷新,
   // 因此应用不在前台/引擎仍存活时任务照跑, 不再依赖 setInterval 在前台触发。
   useEffect(()=>{
@@ -1031,7 +1319,14 @@ export default function App(){
       const list=await loadTasks().catch(()=>last ?? []);
       // 把引擎里 Agent 新建/删除/运行更新后的任务同步进 UI;内容无变化则不触发 re-render。
       if(!last||!tasksEqual(list,last))setTasks(list);
+      const changed=last!==null&&!tasksEqual(list,last);
       last=list;
+      // 定时任务到点执行后, 引擎会把结果写入任务专属对话线程(chat_threads)。
+      // 这里检测到任务状态变化就拉取一次服务端线程并广播, 让对话区实时出现运行记录。
+      if(changed){
+        await syncThreadsFromServer().catch(()=>undefined);
+        window.dispatchEvent(new Event("quant-threads-updated"));
+      }
     };
     void refresh();
     const timer=setInterval(refresh,15000);
@@ -1042,7 +1337,7 @@ export default function App(){
   const launchAgent=(prompt:string)=>{setDraft(prompt);selectChat(null)};
   useEffect(()=>{const fn=(e:KeyboardEvent)=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();setPalette(v=>!v)}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="n"){e.preventDefault();setDraft("");selectChat(null)}if((e.ctrlKey||e.metaKey)&&e.key===","){e.preventDefault();setPage("settings")}if(e.key==="Escape"){setPalette(false);setKeyModal(null);setAddViewOpen(false);setAddBottomOpen(false)}};addEventListener("keydown",fn);return()=>removeEventListener("keydown",fn)},[]);
   const renderView=useCallback((av:ViewDef,onOpenStock:(t:StockTarget)=>void)=>{
-    if(av.page==="agent")return <AgentPage status={status} onNavigate={setPage} onSetup={setKeyModal} ensureProvider={ensureProvider} initialDraft={draft} clearDraft={()=>setDraft("")} model={model} notify={notify} ctxCollapsed={ctxCollapsed} onToggleCtx={()=>setCtxCollapsed(v=>!v)} activeChatId={activeChatId} onChatId={id=>{setActiveChatId(id);setActiveChatIdState(id)}}/>;
+    if(av.page==="agent")return <AgentPage status={status} onNavigate={setPage} onSetup={setKeyModal} ensureProvider={ensureProvider} initialDraft={draft} clearDraft={()=>setDraft("")} model={model} setModel={setModel} notify={notify} ctxCollapsed={ctxCollapsed} onToggleCtx={()=>setCtxCollapsed(v=>!v)} activeChatId={activeChatId} onChatId={id=>{setActiveChatId(id);setActiveChatIdState(id)}}/>;
     if(av.page==="overview")return <OverviewPage status={status} onNavigate={setPage}/>;
     if(av.page==="sessions")return <SessionsPage notify={notify} onOpenChat={id=>selectChat(id||null)}/>;
     if(av.page==="models")return <ModelsPage launchAgent={launchAgent}/>;
@@ -1100,10 +1395,15 @@ export default function App(){
       </>}
     </span>
   ) : undefined;
+  // 账户门控：登录/注册完成前不渲染工作区
+  if(auth.phase!=="ready"){
+    if(auth.phase==="checking")return <div className="auth-screen"><div className="auth-boot"><img className="auth-logo" src={altasDark} alt="QuantDesk" draggable={false}/><img className="auth-logo dark" src={altasLight} alt="" aria-hidden="true" draggable={false}/><span>正在连接本地引擎…</span></div></div>;
+    return <AuthScreen mode={auth.mode} note={auth.note} onAuthed={handleAuthed}/>;
+  }
   return <div className={`app-shell ${collapsed?"sidebar-collapsed":""}${browserOpen&&!dockCollapsed?" dock-open":""}`} style={{gridTemplateColumns:collapsed?"72px 1fr":`${sidebarW}px 1fr`}}>{collapsed?null:<div className="sidebar-splitter" style={{left:sidebarW}} onPointerDown={e=>{e.preventDefault();const t=e.currentTarget as HTMLElement;const startX=e.clientX;const startW=sidebarW;const shell=document.querySelector(".app-shell") as HTMLElement|null;t.setPointerCapture(e.pointerId);let lastW=startW;if(shell)shell.classList.add("no-anim");const move=(ev:PointerEvent)=>{lastW=Math.round(Math.max(180,Math.min(420,startW+(ev.clientX-startX))));if(shell)shell.style.gridTemplateColumns=`${lastW}px 1fr`;t.style.left=lastW+"px"};const up=()=>{t.removeEventListener("pointermove",move);t.removeEventListener("pointerup",up);t.removeEventListener("pointercancel",up);if(shell)shell.classList.remove("no-anim");setSidebarW(lastW)};t.addEventListener("pointermove",move);t.addEventListener("pointerup",up);t.addEventListener("pointercancel",up)}} title="拖动调整侧边栏宽度"/>}<aside className="sidebar"><div className="sidebar-top" data-tauri-drag-region><button className="brand" onClick={()=>setPage("agent")}><img className="brand-logo" src={(theme==="system"?(systemDark?"dark":"light"):theme)==="dark"?altasLight:altasDark} alt="QuantDesk" draggable={false}/></button></div><div className="sidebar-tools"><button className="icon-btn collapse-btn" title={collapsed?"展开侧边栏":"折叠侧边栏"} onClick={()=>setCollapsed(!collapsed)}>{collapsed?<ChevronsRight size={15}/>:<Menu size={15}/>}</button><button className="new-research" onClick={()=>{setDraft("");selectChat(null)}}><Plus/><span>新建任务</span><kbd>Ctrl N</kbd></button></div><nav>{navGroups.map(group=><div className="nav-group" key={group.label}><small>{group.label}</small>{group.items.map(({id,label,icon:Icon})=>{
   const isBrowser=id==="browser";
   return <button key={id} className={isBrowser?(browserOpen?"active":""):(mainView.page===id?"active":"")} onClick={()=>{if(isBrowser){setBrowserOpen(v=>{if(!v)setDockCollapsed(false);return !v})}else{setPage(id)}}}><Icon/><span>{label}</span></button>
-})}</div>)}</nav><div className="sidebar-bottom"><button className={page==="settings"?"active":""} onClick={()=>setPage("settings")}><Settings/><span>设置</span></button><div className="engine-mini"><span className="engine-dot"><i/></span><span><strong>本地引擎</strong><small>{providerReady(status,model)?`${providerLabel(model)} 已配置`:"等待模型 API Key"}</small></span></div><div className="profile"><span>QD</span><span><strong>本地工作区</strong><small>{status.market_rows?`${status.market_rows.toLocaleString()} 行数据`:"无市场数据"}</small></span></div></div></aside><main className="main"><header className="topbar" data-tauri-drag-region><div className="page-title" data-tauri-drag-region><h2>{title.title}</h2><span>/</span><p>{title.subtitle}</p></div><div className="top-actions"><button className="command-trigger" onClick={()=>setPalette(true)}><Search/><span>搜索或运行命令</span><kbd>Ctrl K</kbd></button><div className="view-add-wrap"><button className={`icon-btn view-add-btn${addViewOpen?" active":""}`} title="添加上方视图" onClick={()=>setAddViewOpen(v=>!v)}><Plus size={15}/></button>{addViewOpen&&<><div className="view-add-backdrop" onClick={()=>setAddViewOpen(false)}/><div className="view-add-drop"><div className="view-add-head">添加上方视图<small>与主视图并排，最多 3 个</small></div>{VIEW_MODULES.map(m=><button key={m.page} onClick={()=>addView(m,"top")}><m.icon size={14}/><span>{m.label}</span>{views.some(v=>v.page===m.page&&m.page!=="browser")&&<Check size={12} className="vad-check"/>}</button>)}</div></>}</div><button className="icon-btn" onClick={()=>setTheme(theme==="light"?"dark":"light")}>{theme==="light"?<Moon/>:<Sun/>}</button><WindowControls/></div></header><div className="content-scroll" style={browserOpen&&!dockCollapsed?{marginRight:dockW+BROWSER_INSET}:undefined}><div className="multi-views" ref={multiRef} style={{gridTemplateColumns:"1fr",gridTemplateRows:bottomViews.length?viewRows(hSplit):"1fr"}}>
+})}</div>)}</nav><div className="sidebar-bottom"><button className={page==="settings"?"active":""} onClick={()=>setPage("settings")}><Settings/><span>设置</span></button><div className="engine-mini"><span className="engine-dot"><i/></span><span><strong>本地引擎</strong><small>{providerReady(status,model)?`${providerLabel(model)} 已配置`:"等待模型 API Key"}</small></span></div><div className="profile"><span>{auth.user?auth.user.slice(0,2):"QD"}</span><span><strong>{auth.user||"本地工作区"}</strong><small>{auth.user?"已登录 · 点击右侧退出":status.market_rows?`${status.market_rows.toLocaleString()} 行数据`:"无市场数据"}</small></span>{auth.user?<button className="profile-logout" title="退出登录" onClick={()=>void handleLogout()}><LogOut size={13}/></button>:null}</div></div></aside><main className="main"><header className="topbar" data-tauri-drag-region><div className="page-title" data-tauri-drag-region><h2>{title.title}</h2><span>/</span><p>{title.subtitle}</p></div><div className="top-actions"><button className="command-trigger" onClick={()=>setPalette(true)}><Search/><span>搜索或运行命令</span><kbd>Ctrl K</kbd></button><div className="view-add-wrap"><button className={`icon-btn view-add-btn${addViewOpen?" active":""}`} title="添加上方视图" onClick={()=>setAddViewOpen(v=>!v)}><Plus size={15}/></button>{addViewOpen&&<><div className="view-add-backdrop" onClick={()=>setAddViewOpen(false)}/><div className="view-add-drop"><div className="view-add-head">添加上方视图<small>与主视图并排，最多 3 个</small></div>{VIEW_MODULES.map(m=><button key={m.page} onClick={()=>addView(m,"top")}><m.icon size={14}/><span>{m.label}</span>{views.some(v=>v.page===m.page&&m.page!=="browser")&&<Check size={12} className="vad-check"/>}</button>)}</div></>}</div><button className="icon-btn" onClick={()=>setTheme(theme==="light"?"dark":"light")}>{theme==="light"?<Moon/>:<Sun/>}</button><WindowControls/></div></header><div className="content-scroll" style={browserOpen&&!dockCollapsed?{marginRight:dockW+BROWSER_INSET}:undefined}><div className="multi-views" ref={multiRef} style={{gridTemplateColumns:"1fr",gridTemplateRows:bottomViews.length?viewRows(hSplit):"1fr"}}>
       <div className="mv-row mv-row-top" ref={topRowRef} style={{gridTemplateColumns:topPanels.length===1?"1fr":viewCols(renderSplits)}}>
         {topPanels.map((v,i)=><Fragment key={v.key}>{i>0&&<div className="view-splitter vs-v" onPointerDown={vsplitTopDrag(i-1)} title="拖动调整面板宽度"/>}{paneNode(v)}</Fragment>)}
       </div>

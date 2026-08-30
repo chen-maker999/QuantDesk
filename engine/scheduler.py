@@ -32,6 +32,7 @@ class ScheduledTaskIn(BaseModel):
     provider: str | None = Field(default=None, max_length=32)
     reasoning: str | None = Field(default=None, max_length=16)
     enabled: bool = True
+    tradingDaysOnly: bool = False
     createdAt: int = Field(ge=0)
     lastRunAt: int | None = None
     lastStatus: str | None = Field(default=None, max_length=16)

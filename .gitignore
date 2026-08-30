@@ -11,3 +11,8 @@ engine-dist/
 .idea/
 .vscode/
 *.log
+
+# 根目录临时调试输出与会话产物
+/*.txt
+/.spec/
+.cargo/

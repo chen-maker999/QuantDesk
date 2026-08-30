@@ -1,0 +1,16 @@
+{
+  "name": "QuantDesk Mobile",
+  "short_name": "QuantDesk",
+  "description": "QuantDesk 量化工作台移动端 —— 行情、模拟交易与 AI Agent",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#181818",
+  "theme_color": "#181818",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "192x192", "type": "image/png", "purpose": "any" }
+  ]
+}

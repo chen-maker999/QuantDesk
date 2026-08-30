@@ -18,6 +18,7 @@ export type ScheduledTask = {
   provider?: string;      // 留空则按模型推断（openai | deepseek | qwen）
   reasoning?: "off" | "low" | "medium" | "high";
   enabled: boolean;
+  tradingDaysOnly?: boolean; // 周期任务仅在 A 股交易日运行(once 不受限)；默认 false=每天运行
   createdAt: number;
   lastRunAt?: number;
   lastStatus?: "idle" | "running" | "done" | "error";
@@ -113,9 +114,9 @@ export function nextRun(task: ScheduledTask): number | null {
   }
   if (task.frequency === "interval") {
     const step = Math.max(1, task.intervalMinutes || 60) * 60 * 1000;
-    const last = task.lastRunAt;
-    if (!last) return now.getTime() + step; // 首次运行在创建后一个间隔
-    return last + step; // 可能已过期 → 下一次检查时立即触发
+    // 与引擎 _task_due 同源：基于创建时间(或上次运行)推算，不随界面刷新漂移
+    const base = task.lastRunAt || task.createdAt || now.getTime();
+    return base + step;
   }
   if (task.frequency === "hourly") {
     const d = new Date(now);
@@ -146,6 +147,7 @@ const pad = (n: number) => String(n).padStart(2, "0");
 export function describeNext(task: ScheduledTask): string {
   const t = nextRun(task);
   if (t === null) return task.enabled ? "已到期/不再运行" : "已关闭";
+  if (t <= Date.now()) return "即将运行"; // 间隔已错过, 引擎将在下个调度循环补跑
   const d = new Date(t);
   const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][d.getDay()];
   return `${d.getMonth() + 1}月${d.getDate()}日 ${weekday} ${pad(d.getHours())}:${pad(d.getMinutes())}`;

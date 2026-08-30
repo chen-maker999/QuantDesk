@@ -762,7 +762,9 @@ def market_kline(symbol: str, market: str = "a", period: str = "daily", adjust: 
     market = market if market in ("a", "index") else "a"
     period = period if period in ("daily", "weekly", "monthly", "1", "5", "15", "30", "60", "intraday") else "daily"
     adjust = adjust if adjust in ("qfq", "hfq", "") else "qfq"
-    limit = max(20, min(int(limit), 320))
+    # 日/周/月最多约 8 年；分钟线仍限制在 320 以免单次响应过大。
+    kline_cap = 320 if period in ("1", "5", "15", "30", "60", "intraday") else 2000
+    limit = max(20, min(int(limit), kline_cap))
 
     if period == "intraday":
         try:
@@ -821,7 +823,7 @@ def import_daily_prices(symbol: str, market: str = "a", adjust: str = "qfq", lim
     symbol = symbol.strip()
     market = market if market in ("a", "index") else "a"
     adjust = adjust if adjust in ("qfq", "hfq", "") else "qfq"
-    limit = max(20, min(int(limit or 320), 320))
+    limit = max(20, min(int(limit or 800), 2000))
     result = market_kline(symbol=symbol, market=market, period="daily", adjust=adjust, limit=limit)
     bars = result.get("bars") or []
     stored_symbol = f"{symbol}.IDX" if market == "index" else symbol

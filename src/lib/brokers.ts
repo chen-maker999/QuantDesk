@@ -7,6 +7,8 @@ export type BrokerStatus = {
   broker: BrokerId; configured: boolean; connected: boolean; trading_mode?: "paper" | "live";
   max_order_notional?: number; max_open_orders?: number; account_id?: string | null;
   gateway_url?: string | null; live_armed_until?: number | null;
+  max_daily_loss_pct?: number; max_orders_per_hour?: number; max_position_notional?: number;
+  risk?: { orders_last_hour: number; day_start_equity: number | null; breaker_tripped: string | null };
 };
 export type BrokerOrder = {
   id: string; symbol: string; side: string; order_type: string; quantity: number; filled_quantity: number;
@@ -19,6 +21,7 @@ export type BrokerPosition = {
 export type BrokerCredentials = {
   api_key?: string; api_secret?: string; gateway_url?: string; account_id?: string;
   trading_mode: "paper" | "live"; max_order_notional: number; max_open_orders?: number;
+  max_daily_loss_pct?: number; max_orders_per_hour?: number; max_position_notional?: number;
 };
 export type BrokerOrderInput = {
   symbol: string; side: "buy" | "sell"; quantity: number; order_type: "market" | "limit" | "stop" | "stop_limit";
@@ -39,6 +42,7 @@ export async function configureBrokerEngine(broker: BrokerId): Promise<void> {
   await invoke("configure_broker_engine", { broker });
 }
 
+export const listOmsDrafts = (): Promise<{ ok: boolean; drafts: Array<{ id: string; created_at: number; status: string; payload: { note?: string; orders?: Array<Record<string, unknown>> } }> }> => jsonRequest("/brokers/drafts");
 export const listBrokers = (): Promise<{ brokers: BrokerStatus[]; live_confirmation: string; live_arm_seconds: number }> => jsonRequest("/brokers");
 export const connectBroker = (broker: BrokerId): Promise<BrokerStatus & { account?: Record<string, unknown> }> => jsonRequest(`/brokers/${broker}/connect`, { method: "POST" });
 export const getBrokerAccount = (broker: BrokerId): Promise<{ broker: BrokerId; account?: Record<string, unknown>; account_id?: string; summary?: unknown }> => jsonRequest(`/brokers/${broker}/account`);
@@ -48,5 +52,6 @@ export const getBrokerTrades = (broker: BrokerId): Promise<{ broker: BrokerId; t
 export const lookupIbkrContracts = (symbol: string): Promise<{ contracts: Array<{ contract_id: string; symbol: string; description?: string; asset_class?: string; listing_exchange?: string }> }> => jsonRequest(`/brokers/ibkr/contracts?symbol=${encodeURIComponent(symbol)}`);
 export const armBrokerLive = (broker: BrokerId, confirmation: string): Promise<{ live_armed_until: number }> => jsonRequest(`/brokers/${broker}/arm-live`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation }) });
 export const disarmBrokerLive = (broker: BrokerId): Promise<{ live_armed_until: null }> => jsonRequest(`/brokers/${broker}/disarm-live`, { method: "POST" });
+export const resetBrokerBreaker = (broker: BrokerId): Promise<BrokerStatus> => jsonRequest(`/brokers/${broker}/reset-breaker`, { method: "POST" });
 export const placeBrokerOrder = (broker: BrokerId, input: BrokerOrderInput): Promise<{ ok: boolean; response: unknown }> => jsonRequest(`/brokers/${broker}/orders`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
 export const cancelBrokerOrder = (broker: BrokerId, orderId: string): Promise<{ ok: boolean }> => jsonRequest(`/brokers/${broker}/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });

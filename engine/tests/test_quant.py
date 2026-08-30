@@ -1,7 +1,8 @@
 import numpy as np
+import pandas as pd
 import unittest
 
-from engine.quant import AlphaEnsemble, backtest_signal, optimize_portfolio, risk_report
+from engine.quant import AlphaEnsemble, backtest_signal, optimize_portfolio, risk_report, walk_forward
 
 
 class QuantTests(unittest.TestCase):
@@ -65,6 +66,39 @@ class QuantTests(unittest.TestCase):
         split = max(int(len(x) * .78), 30)
         np.testing.assert_array_equal(scaler.fit_inputs[0], x[:split])
         np.testing.assert_array_equal(scaler.fit_inputs[-1], x)
+
+    def test_walk_forward_outputs_windows_and_combined_oos(self):
+        # 动量结构收益(正自相关), 让 lookback 族存在可学信号
+        rng = np.random.default_rng(13)
+        shocks = rng.normal(0.0004, 0.012, 600)
+        returns = np.empty(600)
+        returns[0] = shocks[0]
+        for t in range(1, 600):
+            returns[t] = 0.35 * returns[t - 1] + shocks[t]
+        dates = pd.date_range("2024-01-01", periods=600, freq="B").strftime("%Y-%m-%d").tolist()
+        result = walk_forward(returns.tolist(), {"lookback": [5, 20, 60]}, train_days=252, test_days=63, dates=dates)
+        self.assertGreaterEqual(result["n_windows"], 5)
+        self.assertEqual(result["oos_days"], result["n_windows"] * 63)
+        for k, w in enumerate(result["windows"]):
+            self.assertIn(w["params"]["lookback"], [5, 20, 60])
+            for key in ("is_sharpe", "oos_sharpe", "oos_annual_return", "oos_max_drawdown"):
+                self.assertIn(key, w)
+            # 日期范围与滚动窗对齐: 第 k 窗测试段结束于 train + (k+1)*test - 1
+            self.assertEqual(w["test"]["end"], dates[252 + (k + 1) * 63 - 1])
+        combined = result["combined"]
+        for key in ("annual_return", "annual_volatility", "sharpe", "max_drawdown", "win_rate", "equity_curve"):
+            self.assertIn(key, combined)
+        self.assertEqual(len(combined["equity_curve"]), result["oos_days"])
+        self.assertIn("degradation", result["overfit_check"])
+
+    def test_walk_forward_rejects_insufficient_or_invalid_input(self):
+        rng = np.random.default_rng(5)
+        with self.assertRaises(ValueError):
+            walk_forward(rng.normal(0, .01, 300).tolist(), {"lookback": [10]}, train_days=252, test_days=63)
+        with self.assertRaises(ValueError):
+            walk_forward(rng.normal(0, .01, 400).tolist(), {"lookback": []})
+        with self.assertRaises(ValueError):
+            walk_forward(rng.normal(0, .01, 400).tolist(), {"lookback": [150]}, train_days=100)
 
 
 if __name__ == "__main__":

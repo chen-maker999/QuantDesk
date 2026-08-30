@@ -79,6 +79,7 @@ export function PortfolioBacktestCard({ status }: { status: WorkspaceStatus }) {
   const [rebal, setRebal] = useState(20);
   const [cost, setCost] = useState(12);
   const [slip, setSlip] = useState(5);
+  const [benchmark, setBenchmark] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<PortfolioBacktestResult | null>(null);
   const [error, setError] = useState("");
@@ -103,19 +104,22 @@ export function PortfolioBacktestCard({ status }: { status: WorkspaceStatus }) {
 
   const run = async () => {
     setBusy(true); setError(""); setResult(null);
-    try { setResult(await runPortfolioBacktest({ weights: parsedWeights, rebalanceDays: rebal, costBps: cost, slippageBps: slip })) }
+    try { setResult(await runPortfolioBacktest({ weights: parsedWeights, rebalanceDays: rebal, costBps: cost, slippageBps: slip, benchmark })) }
     catch (e) { setError(e instanceof Error ? e.message : "回测失败") }
     finally { setBusy(false) }
   };
 
   const m = result?.metrics;
+  const c = result?.comparison;
+  const benchName = result?.benchmark || "等权基准";
   return <div className="card factor-card">
-    <div className="provider-heading"><span><RefreshCw/></span><div><h2>组合再平衡回测</h2><p>多标的按目标权重定期再平衡，计入佣金与滑点；输出净值曲线、超额与逐标的归因。</p></div></div>
+    <div className="provider-heading"><span><RefreshCw/></span><div><h2>组合再平衡回测</h2><p>多标的按目标权重定期再平衡，计入佣金与滑点；输出净值曲线、基准对比、月度收益与逐标的归因。</p></div></div>
     <label className="weights-label">目标权重（代码:权重，逗号分隔）<textarea value={weightsText} onChange={e => setWeightsText(e.target.value)} placeholder={"600519: 0.3, 000001: 0.4, 600036: 0.3"} rows={2}/></label>
     <div className="factor-params">
       <label>再平衡周期(日)<input type="number" min={0} max={250} value={rebal} onChange={e => setRebal(Math.max(0, Math.min(250, Number(e.target.value) || 20)))}/></label>
       <label>成本(bps)<input type="number" min={0} max={200} value={cost} onChange={e => setCost(Math.max(0, Number(e.target.value) || 0))}/></label>
       <label>滑点(bps)<input type="number" min={0} max={200} value={slip} onChange={e => setSlip(Math.max(0, Number(e.target.value) || 0))}/></label>
+      <label>基准代码<input type="text" value={benchmark} onChange={e => setBenchmark(e.target.value)} placeholder="000300（需已导入）" spellCheck={false}/></label>
       <button className="secondary-btn" onClick={() => void suggestHoldings()}>填入模拟持仓</button>
       <button className="primary-btn" disabled={busy || Object.keys(parsedWeights).length === 0} onClick={() => void run()}>{busy ? <RefreshCw className="spin"/> : <FlaskConical/>}运行回测</button>
     </div>
@@ -123,8 +127,8 @@ export function PortfolioBacktestCard({ status }: { status: WorkspaceStatus }) {
     {!status.market_rows && <p className="ens-empty">尚未导入市场数据，回测需要标的的本地价格历史。</p>}
     {error && <div className="inline-error"><AlertTriangle size={14}/><span>{error}</span></div>}
     {m && result && <div className="factor-result">
-      <NavChart navs={[{ values: result.nav || [], color: "#c0392b" }, { values: result.benchmark_nav || [], color: "#7f8c8d" }]} labels={["组合", "基准"]}/>
-      <p className="decay-line">红线=组合，灰线=等权基准 · {result.start} ~ {result.end} · 再平衡 {m.rebalances} 次</p>
+      <NavChart navs={[{ values: result.nav || [], color: "#c0392b" }, { values: result.benchmark_nav || [], color: "#7f8c8d" }]} labels={["组合", `基准（${benchName}）`]}/>
+      <p className="decay-line">红线=组合，灰线=基准（{benchName}）· {result.start} ~ {result.end} · 再平衡 {m.rebalances} 次</p>
       <div className="result-real-grid">
         <div className="card"><small>累计收益</small><strong className={m.total_return > 0 ? "tone-up" : "tone-down"}>{signedPct(m.total_return)}</strong></div>
         <div className="card"><small>年化收益</small><strong className={m.annual_return > 0 ? "tone-up" : "tone-down"}>{signedPct(m.annual_return)}</strong></div>
@@ -132,9 +136,29 @@ export function PortfolioBacktestCard({ status }: { status: WorkspaceStatus }) {
         <div className="card"><small>最大回撤</small><strong className="tone-down">{pct(m.max_drawdown)}</strong></div>
         <div className="card"><small>胜率</small><strong>{pct(m.win_rate)}</strong></div>
         <div className="card"><small>成本拖累</small><strong>{pct(m.total_cost_drag)}</strong></div>
-        <div className="card"><small>基准年化</small><strong>{signedPct(result.benchmark_annual_return)}</strong></div>
+        <div className="card"><small>基准年化（{benchName}）</small><strong>{signedPct(result.benchmark_annual_return)}</strong></div>
         <div className="card"><small>平均换手</small><strong>{pct(m.avg_turnover_per_rebal)}</strong></div>
+        {!!m.deferred_trades && <div className="card"><small>涨跌停顺延</small><strong className="tone-down">{m.deferred_trades} 次</strong></div>}
       </div>
+      {c && <>
+        <h3>基准对比（{benchName}）</h3>
+        <div className="result-real-grid">
+          <div className="card"><small>超额年化</small><strong className={c.excess_annual_return > 0 ? "tone-up" : "tone-down"}>{signedPct(c.excess_annual_return)}</strong></div>
+          <div className="card"><small>Alpha 年化</small><strong className={c.alpha_annual > 0 ? "tone-up" : "tone-down"}>{signedPct(c.alpha_annual)}</strong></div>
+          <div className="card"><small>Beta</small><strong>{c.beta.toFixed(3)}</strong></div>
+          <div className="card"><small>信息比率</small><strong className={c.information_ratio > 0 ? "tone-up" : "tone-down"}>{c.information_ratio.toFixed(3)}</strong></div>
+          <div className="card"><small>跟踪误差</small><strong>{pct(c.tracking_error)}</strong></div>
+        </div>
+        {result.relative_nav && result.relative_nav.length > 1 && <>
+          <h3>相对净值（组合 / 基准）</h3>
+          <NavChart navs={[{ values: result.relative_nav, color: "#2563eb" }]} labels={["相对净值"]}/>
+        </>}
+      </>}
+      {result.monthly_returns && result.monthly_returns.length > 0 && <>
+        <h3>月度收益</h3>
+        <div className="layer-table">{result.monthly_returns.slice(-12).map(row =>
+          <span key={row.month}><em>{row.month}</em><b className={row.return > 0 ? "tone-up" : "tone-down"}>{signedPct(row.return)}</b></span>)}</div>
+      </>}
       {result.attribution && Object.keys(result.attribution).length > 0 &&
         <div className="layer-table">{Object.entries(result.attribution).sort((a, b) => b[1] - a[1]).map(([symbol, v]) =>
           <span key={symbol}><em>{symbol}</em><b className={v > 0 ? "tone-up" : "tone-down"}>{signedPct(v)}</b></span>)}</div>}

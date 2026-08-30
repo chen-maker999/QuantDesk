@@ -17,6 +17,17 @@
 .paper-risk-policy { margin: -4px 0 14px; padding: 9px 12px; display: flex; gap: 9px; align-items: baseline; font-size: 9px; color: var(--muted); }
 .paper-risk-policy b { color: var(--text); white-space: nowrap; font-size: 10px; }
 
+/* 账户级风控熔断横幅 */
+.paper-guard-banner { margin: -4px 0 14px; padding: 10px 12px; display: flex; gap: 10px; align-items: center; justify-content: space-between; font-size: 9px; }
+.paper-guard-banner b { font-size: 10px; display: block; margin-bottom: 2px; }
+.paper-guard-banner span { color: var(--muted); }
+.paper-guard-banner.ok { border-left: 3px solid var(--green, #16a34a); }
+.paper-guard-banner.ok b { color: var(--green, #16a34a); }
+.paper-guard-banner.halted { border-left: 3px solid var(--red); background: var(--red-soft); }
+.paper-guard-banner.halted b { color: var(--red); }
+.paper-guard-banner .pgb-text { display: flex; flex-direction: column; gap: 1px; }
+.paper-pre-row { display: inline-flex; gap: 5px; }
+
 /* ---------- 布局: 表单 | 列表 ---------- */
 .paper-layout { display: grid; grid-template-columns: 330px 1fr; gap: 12px; align-items: start; }
 @media (max-width: 1080px) { .paper-layout { grid-template-columns: 1fr; } }
