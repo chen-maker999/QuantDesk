@@ -31,7 +31,7 @@ class SecurityBoundaryTest(unittest.TestCase):
         from fastapi.testclient import TestClient
         with TestClient(main.app) as client:
             # 局域网/本机来源放行（手机 H5、桌面 dev server）
-            for origin in ("http://192.168.0.116:5173", "http://localhost:1420", "http://10.0.0.8:4173"):
+            for origin in ("http://192.168.1.50:5173", "http://localhost:1420", "http://10.0.0.8:4173"):
                 r = client.options("/health", headers={"Origin": origin, "Access-Control-Request-Method": "GET"})
                 self.assertEqual(r.headers.get("access-control-allow-origin"), origin, origin)
             # 互联网任意网页被 CORS 拒绝

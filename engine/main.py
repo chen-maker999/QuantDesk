@@ -299,7 +299,7 @@ app.include_router(scheduler_router)
 def _cors_origin_regex() -> str:
     """CORS 来源策略（可配置）:
     - QUANTDESK_CORS_OPEN=1        → 全放开(旧行为, 仅调试用);
-    - QUANTDESK_CORS_EXTRA_ORIGINS → 显式追加来源, 逗号分隔(如 http://192.168.0.116:5173);
+    - QUANTDESK_CORS_EXTRA_ORIGINS → 显式追加来源, 逗号分隔(如 http://192.168.1.50:5173);
     - 默认收紧: 放行桌面端白名单 + 本机/局域网来源; 互联网任意网页 fetch 引擎会被 CORS 拒绝。
       真正的访问控制仍由进程令牌/会话鉴权承担, CORS 是第一道隔离网。
     """

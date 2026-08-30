@@ -21,7 +21,7 @@ set "QUANTDESK_ENGINE_HOST=0.0.0.0"
 if "%QUANTDESK_MOBILE_TOKEN%"=="" set "QUANTDESK_MOBILE_TOKEN=quantdesk-mobile"
 
 REM CORS 来源策略（可选）：默认只放行本机/局域网来源(手机 H5 的 LAN 地址自动放行)；
-REM 需要显式追加来源时(逗号分隔)：set "QUANTDESK_CORS_EXTRA_ORIGINS=http://192.168.0.116:5173"
+REM 需要显式追加来源时(逗号分隔)：set "QUANTDESK_CORS_EXTRA_ORIGINS=http://192.168.1.50:5173"
 REM 需要完全放开(旧行为, 不推荐)：set "QUANTDESK_CORS_OPEN=1"
 
 REM 无 Key 模式检测：手工启动的引擎不会从凭据管理器注入模型密钥，
