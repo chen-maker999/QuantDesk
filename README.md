@@ -1,87 +1,72 @@
+<div align="center">
+
 # QuantDesk
 
-QuantDesk 是由投资 Agent 主导的 Windows 本地优先量化研究桌面软件。用户提出投资目标，Agent 自主规划任务、调用行情/模型/回测/组合/风险工具并交付可审计结论。产品采用 Tauri + React、独立 Python 算法引擎和 SQLite 本地数据库，设计语言参考 Codex 桌面端的信息密度、侧边栏、命令面板与流式运行状态。
+**本地优先的 AI 量化投研工作台**
 
-## 当前原型包含
+中文 · [English](README_EN.md) · [日本語](README_JA.md)
 
-- Agent 主工作区、任务执行轨迹、工具调用卡片、监督/自主权限、审批边界与上下文面板
-- 市场总览、研究会话、模型中心、策略回测、数据中心、投资组合、风险中心与设置
-- OpenAI Responses API，以及 DeepSeek、Qwen 的 OpenAI 兼容工具循环；过程文本、工具事件与最终答案逐段流式展示
-- Alpha Vantage 全球股票与外汇日线、Tushare Pro A 股与国内期货合约日线，也支持 CSV 导入；完整日线会保留 OHLCV/成交额、市场、复权和来源元数据供因子研究使用，缺字段时不会填造
-- `Ctrl+K` 命令面板、`Ctrl+N` 新任务、可折叠侧边栏与深浅主题
-- 所有 API Key 通过 Windows Credential Manager 独立保存，不写入项目文件或浏览器存储
-- Windows 后台算法引擎以无控制台模式运行，应用内不提供终端面板
-- 实盘 OMS：Alpaca（官方 REST，默认 Paper）与 IBKR Client Portal Gateway（仅本机回环）；账户、持仓、订单、成交同步与受控下单均独立于 Agent 和模拟盘
-- Python FastAPI 本地服务、SQLite/WAL 元数据与实验审计记录
-- 点时特征工程、HistGradientBoosting/ExtraTrees/Ridge 加权集成、稳健缩放与验证集误差加权
-- Ledoit–Wolf 收缩协方差、受约束均值方差优化、风险贡献、VaR/CVaR、最大回撤与含成本回测
-- 模拟盘 T+1 / 涨跌停拒单、账户熔断、条件单；Agent 可走 Walk-Forward（动量/因子 IC/组合静态权重）与实验工件检索
-- 移动端令牌与桌面进程令牌分权：实盘 OMS 仅桌面端
+</div>
 
-> 投资风险提示：该软件是研究与决策支持工具，预测结果不构成投资建议。任何实盘接入前都应完成数据授权、合规审查、样本外验证和小资金灰度测试。
+---
 
-## 本地运行
+QuantDesk 是一款运行在本地的桌面应用（Tauri + React + Python 引擎），把 **AI 投资Agent、行情数据、策略回测、模拟交易与风险控制** 收进同一个工作区。所有数据、密钥与对话均保存在本机，不经任何第三方服务器中转。
 
-```powershell
+## 功能亮点
+
+### 🤖 投资 Agent
+用自然语言下达研究目标，Agent 会自动调用行情、资金流、K 线形态等工具并交付可追溯的结论；研究过程中还可以一键把后续跟踪固化为**定时任务**。
+
+![投资 Agent](docs/screenshots/agent.png)
+
+### 📈 行情中心
+指数与个股的实时行情、K 线与技术指标（MACD 等）、涨跌排行、财经快讯，数据源（Tushare / Alpha Vantage 等）可在设置中自由切换。
+
+![大盘 K 线](docs/screenshots/market-kline.png)
+
+### 🪟 多视图工作区
+Agent 对话、新闻、行情图表可多面板并排，边看盘边研究；支持上下分屏与宽度拖拽。
+
+![多视图](docs/screenshots/multi-view.png)
+
+### 更多模块
+- **量化工具**：算法工具、时点信号回测、Walk-Forward 滚动检验、因子研究、组合再平衡回测
+- **投资管理**：投资组合、模拟交易（撮合与持仓风控）、实盘 OMS（仅桌面端可操作）、风险中心
+- **定时任务**：按频率/交易日自动运行研究任务，结果写回专属对话线程
+- **效率工具**：内置浏览器、命令面板（Ctrl+K）、Token 用量看板与热力图
+
+## 架构
+
+| 层 | 技术 |
+|---|---|
+| 桌面壳 | Rust + Tauri 2 |
+| 前端 | React 18 + TypeScript + Vite |
+| 本地引擎 | Python FastAPI（端口 8765） |
+| 持久化 | SQLite（WAL 模式 + schema 迁移） |
+| 模型 | OpenAI / DeepSeek / Qwen / OpenRouter（支持自动选择免费模型） |
+
+## 安全设计
+
+- 本地账户登录（PBKDF2 密码哈希 + 可选 TOTP 两步验证）
+- 引擎随机令牌鉴权：同机/同网其它进程无法静默调用下单、导入等接口
+- API 密钥存放在 **Windows 凭据管理器**，不落盘、不进仓库
+- 实盘 OMS 仅接受桌面进程令牌，手机/会话均不可下真实单
+
+## 本地开发
+
+```bash
+# 1. 安装前端依赖
 npm install
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r engine\requirements.txt
-```
 
-启动算法引擎和桌面端：
-
-```powershell
-.\.venv\Scripts\python.exe engine\main.py
+# 2. 启动桌面端（自动拉起本地引擎）
 npm run tauri dev
+
+# 3. 运行引擎测试
+python -m pytest engine/tests
 ```
 
-生成无需预装 Python 的 Windows 安装包：
+引擎开发文档见 [engine/](engine/)；前端入口为 [src/main.tsx](src/main.tsx)。
 
-```powershell
-npm run engine:bundle
-npm run tauri build
-```
+## License
 
-仅预览界面：
-
-```powershell
-npm run dev
-```
-
-## 日志与备份
-
-- 引擎日志：源码模式在 `engine\logs\engine.log`（RotatingFileHandler 10MB×5 自动轮转），记录启动、端口绑定、鉴权失败与异常；桌面端 spawn 的子进程输出另存同目录 `spawn.log`（打包模式下位于安装目录 `logs\`）
-- 数据库备份：引擎启动时与每日一次自动在线备份到 `~/.quantdesk/backups/quantdesk-YYYYMMDD.db`，保留最近 14 份；设置页或 `POST /backups/now` 可手动触发，`GET /backups` 查看列表
-- 端口占用：引擎固定监听 8765，端口被 TIME_WAIT 占用时自动重试；多实例由桌面端单实例插件互斥
-- 登录会话 7 天过期，需重新登录；可在设置中开启 TOTP 两步验证。后续注册用户默认为 operator（不能实盘）
-- 研究持仓提案默认合并写入并保留快照，可用快照回滚；模拟盘按登录用户分户，支持停牌拒单、期货盯市、市价滑点与研究持仓升进
-- 日线导入/K 线上限 2000 根（约 8 年）；模拟盘股票遵守 T+1 与涨跌停拒单
-- Agent 可检索已保存实验（`get_experiment`），研究类回测/因子在只读模式下也会落盘工件
-
-## 手机端访问与配对
-
-1. 手机与电脑连同一局域网，引擎以 `QUANTDESK_ENGINE_HOST=0.0.0.0` 监听全部网卡（Windows 防火墙需放行 TCP 8765 入站）
-   局域网监听必须同时设置 `QUANTDESK_ENGINE_TLS=1`；仅开发调试可额外设置 `QUANTDESK_ALLOW_INSECURE_LAN=1` 明确允许明文 HTTP。
-2. 手机浏览器打开 `http://<电脑局域网IP>:8765/app`（或桌面端入口二维码）
-3. 首次绑定需在桌面端「设置」生成 6 位一次性配对码（90 秒有效），手机端输入后自动兑换访问令牌；配对错误限流 5 次/5 分钟
-4. 账户体系：首次访问需注册管理员账户，之后登录使用（PBKDF2 加盐哈希 + 会话令牌，登录失败限流）
-5. 手机令牌**不能**访问实盘 OMS（`/brokers` 返回 403）；真实下单只允许持有桌面进程令牌的本机应用
-
-## 验证
-
-```powershell
-npm run build
-.\.venv\Scripts\python.exe -m unittest discover engine\tests -v
-cd src-tauri
-cargo check
-```
-
-## 生产化建议
-
-当前安装包已内置独立算法引擎，目标电脑无需预装 Python。正式公开发布前仍需配置企业代码签名与自动更新；商业数据源和券商实盘适配器应按各自授权协议单独实现。默认架构有意将“研究/回测/模拟”与“真实下单”隔离，避免原型直接触达真实资金。
-
-## 实盘 OMS 配置
-
-在侧边栏“实盘 OMS”中配置。Alpaca 需填写官方 API Key/Secret；IBKR 需先在本机启动、登录并完成二次验证后的 Client Portal Gateway（默认地址 `https://localhost:5000/v1/api`）。券商凭据只保存在 Windows Credential Manager，并在引擎进程内存中使用。
-
-两者均默认 Paper 模式。若显式切换到真实资金，还必须设置本地单笔金额/最大挂单上限，并在当次会话手动输入 `ENABLE LIVE TRADING` 才会暂时解锁下单；Agent 没有任何真实下单工具。手机端与纯登录会话也不能调用 OMS 接口。
+仅供学习与研究使用，不构成任何投资建议。

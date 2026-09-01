@@ -315,21 +315,6 @@ def _cors_origin_regex() -> str:
     return "^(?:" + lan + (("|" + extra_pattern) if extra_pattern else "") + ")$"
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:1420",
-        "http://127.0.0.1:1420",
-        "tauri://localhost",
-        "http://tauri.localhost",
-        "https://tauri.localhost",
-    ],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_origin_regex=_cors_origin_regex(),
-)
-
-
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception):
     """兜底 500：把未处理异常的完整堆栈写入日志文件，便于事后排查。"""
@@ -427,6 +412,23 @@ async def _auth_guard(request: Request, call_next):
         )
         return JSONResponse({"detail": "未登录或引擎令牌不匹配"}, status_code=401)
     return await call_next(request)
+
+
+# CORS 必须在所有 @app.middleware("http") 之后注册：Starlette 后注册者位于最外层，
+# 这样鉴权中间件短路返回的 401/403 也会带上 CORS 头（否则浏览器端 fetch 直接 ERR_FAILED）。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_origin_regex=_cors_origin_regex(),
+)
 
 
 class AuthCredentialsRequest(BaseModel):

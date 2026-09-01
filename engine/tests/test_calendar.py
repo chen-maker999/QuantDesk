@@ -73,7 +73,7 @@ class TradingCalendarTest(unittest.TestCase):
 
 
 class SchedulerTradingDayFilterTest(unittest.TestCase):
-    """定时任务交易日过滤: 周期任务默认不落在非交易日, tradingDaysOnly=false 豁免, once 不受影响。"""
+    """定时任务交易日过滤: 周期任务默认每天运行, tradingDaysOnly=true 才限交易日, once 不受影响。"""
 
     def _task(self, freq: str) -> dict:
         # 触发时刻设为 1 分钟前(动态), createdAt 再往前 2 分钟, 保证满足"已到点未运行"
@@ -82,16 +82,26 @@ class SchedulerTradingDayFilterTest(unittest.TestCase):
         return {"id": "t1", "enabled": True, "frequency": freq, "hour": moment.hour, "minute": moment.minute,
                 "intervalMinutes": 1, "createdAt": created, "lastRunAt": None}
 
-    def test_daily_skips_non_trading_day(self):
+    def test_trading_days_only_true_skips_non_trading_day(self):
+        from engine import main
+        now_ms = int(__import__("time").time() * 1000)
+        tasks = [self._task("daily"), self._task("hourly"), self._task("interval")]
+        for task in tasks:
+            task["tradingDaysOnly"] = True
+        with patch.object(main, "is_trading_day", return_value=False):
+            for task in tasks:
+                self.assertFalse(main._task_due(task, now_ms), task["frequency"])
+        with patch.object(main, "is_trading_day", return_value=True):
+            for task in tasks:
+                self.assertTrue(main._task_due(task, now_ms), task["frequency"])
+
+    def test_default_runs_every_day(self):
+        """默认(未设置 tradingDaysOnly)周期任务每天运行——周末也要能触发。"""
         from engine import main
         now_ms = int(__import__("time").time() * 1000)
         with patch.object(main, "is_trading_day", return_value=False):
-            self.assertFalse(main._task_due(self._task("daily"), now_ms))
-            self.assertFalse(main._task_due(self._task("hourly"), now_ms))
-            self.assertFalse(main._task_due(self._task("interval"), now_ms))
-        with patch.object(main, "is_trading_day", return_value=True):
-            self.assertTrue(main._task_due(self._task("daily"), now_ms))
-            self.assertTrue(main._task_due(self._task("interval"), now_ms))
+            for freq in ("daily", "hourly", "interval"):
+                self.assertTrue(main._task_due(self._task(freq), now_ms), freq)
 
     def test_trading_days_only_false_exempts(self):
         from engine import main

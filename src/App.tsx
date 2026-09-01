@@ -986,16 +986,22 @@ function BrowserDock({open,dockW,collapsed,sidebarW,externalUrl,onExternalConsum
   </div>;
 }
 
+// 浏览器环境（无 Tauri 运行时）下隐藏窗口控制按钮，避免 getCurrentWindow() 同步抛错导致整页崩溃
+const inTauri=()=>typeof window!=="undefined"&&"__TAURI_INTERNALS__" in window;
+
 function WindowControls(){
   const [maximized,setMaximized]=useState(false);
+  const native=inTauri();
   useEffect(()=>{
+    if(!native)return;
     const win=getCurrentWindow();
     const sync=()=>{void win.isMaximized().then(setMaximized).catch(()=>undefined)};
     sync();
     let unlisten:undefined|(()=>void);
     void win.onResized(sync).then(fn=>{unlisten=fn}).catch(()=>undefined);
     return()=>{unlisten?.()};
-  },[]);
+  },[native]);
+  if(!native)return null;
   const run=(fn:()=>Promise<unknown>)=>{void fn().catch(()=>undefined)};
   return <div className="window-controls">
     <button className="win-btn" title="最小化" onClick={()=>run(()=>getCurrentWindow().minimize())}><Minus size={14}/></button>
@@ -1251,7 +1257,7 @@ export default function App(){
   useEffect(()=>{localStorage.setItem("quant-dock-collapsed",dockCollapsed?"1":"0")},[dockCollapsed]);
   useEffect(()=>{localStorage.setItem("quant-ctx-collapsed",ctxCollapsed?"1":"0")},[ctxCollapsed]);
   useEffect(()=>{localStorage.setItem("quant-sidebar-w",String(sidebarW))},[sidebarW]);
-  useEffect(()=>{document.documentElement.dataset.tone=localStorage.getItem("quant-tone")||"cn";document.documentElement.dataset.pointer=localStorage.getItem("quant-pointer")!=="0"?"1":"0";if(localStorage.getItem("quant-always-on-top")==="1")void getCurrentWindow().setAlwaysOnTop(true).catch(()=>undefined);applyFontScale(Number(localStorage.getItem("quant-font-scale"))||1)},[]);
+  useEffect(()=>{document.documentElement.dataset.tone=localStorage.getItem("quant-tone")||"cn";document.documentElement.dataset.pointer=localStorage.getItem("quant-pointer")!=="0"?"1":"0";if(localStorage.getItem("quant-always-on-top")==="1"&&inTauri())void getCurrentWindow().setAlwaysOnTop(true).catch(()=>undefined);applyFontScale(Number(localStorage.getItem("quant-font-scale"))||1)},[]);
   // 账户门控：checking=探测中 gate=显示登录/注册 ready=已登录进入工作区
   const [auth,setAuth]=useState<{phase:"checking"|"gate"|"ready";mode:"login"|"register";user:string|null;note:string}>({phase:"checking",mode:"login",user:null,note:""});
   const bootWorkspace=async()=>{
